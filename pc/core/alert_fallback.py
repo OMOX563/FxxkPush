@@ -71,15 +71,22 @@ def push_vps(payload: dict, log) -> bool:
         # （watchdog.log 7 次 rejected、VPS-SSH兜底送达 0 次），隧道死但 SSH 通
         # 的经典故障里手机收不到任何远程告警。
         auth = f"-H 'Authorization: Bearer {tok}' " if tok else ""
+        # 远端临时文件按**本地 pid** 命名：这条第二层兜底由 watchdog 和
+        # notification_listener 共用（P2-5），两边都写固定
+        # /tmp/fp_watchdog_alert.json 就是双写竞争 —— A 刚写完 B 覆盖掉、
+        # 或 A 的 rm 在 B 的 curl 之前跑（curl -d @ 读不到文件 -> 这条告警
+        # 直接失败）。只有「同时告警」才触发，而那正是最需要兜底的时刻。
+        # 每进程一个固定名：不打架，重试也只是覆盖自己那个，残留有界。
+        tmp_json = f"/tmp/fp_watchdog_alert_{os.getpid()}.json"
         cmd = (
             "set -e; "
-            f"echo {b64} | base64 -d > /tmp/fp_watchdog_alert.json; "
+            f"echo {b64} | base64 -d > {tmp_json}; "
             f"code=$(curl -s -o /dev/null -w '%{{http_code}}' "
             f"{auth}"
             "-H 'Content-Type: application/json' "
-            "-d @/tmp/fp_watchdog_alert.json "
+            f"-d @{tmp_json} "
             "http://127.0.0.1:2586/); "
-            "rm -f /tmp/fp_watchdog_alert.json; "
+            f"rm -f {tmp_json}; "
             "echo $code"
         )
         _, stdout, stderr = cli.exec_command(cmd, timeout=25)

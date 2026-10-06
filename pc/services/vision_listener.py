@@ -72,6 +72,23 @@ SEEN_STATE = HERE / "vision_state.json"
 USER32 = ctypes.windll.user32
 GDI32 = ctypes.windll.gdi32
 
+
+# Monitor 枚举用的结构与回调签名 —— park_needed / move_offscreen 原来各自在
+# 函数体内把这两份（连同 WINFUNCTYPE）一字不差地复制了一遍：改一处漏一处，
+# 每次调用还要重建两套 ctypes 类型对象。模块级定义一次，两者共用。
+class _MonRect(ctypes.Structure):
+    _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                ("r", ctypes.c_long), ("b", ctypes.c_long)]
+
+
+class _MonInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _MonRect),
+                ("rcWork", _MonRect), ("dwFlags", ctypes.c_ulong)]
+
+
+_MON_CB = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong, ctypes.c_ulong,
+                             ctypes.POINTER(_MonRect), ctypes.c_double)
+
 # Coordinate math must use PHYSICAL pixels: a DPI-unaware process sees a
 # virtualized screen width (e.g. 2048 instead of 2560 at 125% scaling), which
 # makes the "off-screen" park position land inside the visible area.
@@ -84,8 +101,8 @@ except Exception:
         pass
 
 
-sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
-                str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fp_feedback/alert_fallback
+# 顶部已插过 pc/ 与 pc/core（sys.path[:0] 那两行），这里不再重复插第二遍
+# —— 重复插入只是让 sys.path 里多两份同名项，模块解析结果完全一样。
 import pclog
 # 日志服务名沿用 "wechat_vision"：watchdog 的 quiet 阈值与「脚本名→日志名」
 # 映射（watchdog.py:75,85）、以及告警文案里的日志路径都认这个名字，
@@ -135,18 +152,33 @@ POLL_SLEEP_MIN = min([POLL_MIN] + [int(t.get("poll_min") or POLL_MIN)
 
 def _seen_load() -> dict:
     try:
-        return json.loads(SEEN_STATE.read_text(encoding="utf-8"))
+        data = json.loads(SEEN_STATE.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
     except Exception as e:
         # state 坏掉 = 已推送指纹全丢 -> 下一轮把同一批消息再推一遍
         log(f"vision_state unreadable ({e!r}); treating all as new")
         return {}
+    # 「可解析但形状不对」也要挡：文件被手改成列表/字符串/数字时，
+    # handle 里的 seen.get(sig, 0) 直接 AttributeError -> 每一轮都是
+    # cycle error（去重链路全废、还被算进采集故障），而 load/save 两端
+    # 都以为自己处理了「坏 state」。triage_state / listener seen 早有
+    # 这一层，这里一直缺。
+    if not isinstance(data, dict):
+        log(f"vision_state 形状不对({type(data).__name__})；当作全空处理")
+        return {}
+    return data
 
 
 def _seen_save(state: dict):
     now = time.time()
-    state = {k: v for k, v in state.items() if now - v < SEEN_TTL}
+    # 值也得校：手改出 `"ts": "2026-..."` / null 时 `now - v` 是 TypeError，
+    # 而它发生在 handle 内部 -> 每轮 cycle error，去重状态永远存不上
+    # （和 _prune_pushes 在 triage_state 上修过的是同一型）。非数值条目
+    # 直接丢：代价是那一条指纹失效、最多重推一次，好过整个去重写不进去。
+    state = {k: v for k, v in state.items()
+             if isinstance(v, (int, float)) and not isinstance(v, bool)
+             and now - v < SEEN_TTL}
     # P2-4：tmp+replace，和 triage_state / seen(通知) 对齐。裸 write_text 写
     # 一半断电会留半截 JSON，_seen_load 读坏返回 {} —— 下一轮把同一批未读
     # **重复推送**（6 小时内）。
@@ -248,18 +280,11 @@ def park_needed(hwnd) -> bool:
     if not USER32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return False
     overlapped = [False]
-    class RECT(ctypes.Structure):
-        _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
-                    ("r", ctypes.c_long), ("b", ctypes.c_long)]
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
-                    ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
-    CB = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong, ctypes.c_ulong,
-                            ctypes.POINTER(RECT), ctypes.c_double)
+    CB = _MON_CB               # 结构/回调签名在模块级（见 _MonInfo）
 
     def cb(hmon, hdc, lprc, data):
-        mi = MONITORINFO()
-        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        mi = _MonInfo()
+        mi.cbSize = ctypes.sizeof(_MonInfo)
         USER32.GetMonitorInfoW(hmon, ctypes.byref(mi))
         w = mi.rcWork
         if (rect.left < w.r and rect.right > w.l
@@ -275,18 +300,11 @@ def move_offscreen(hwnd, w, h):
     """Park the window just beyond the right edge of the rightmost monitor."""
     right_edge = USER32.GetSystemMetrics(0)  # primary width; extend below if multi-monitor
     overlapped = [right_edge]
-    class RECT(ctypes.Structure):
-        _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
-                    ("r", ctypes.c_long), ("b", ctypes.c_long)]
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
-                    ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
-    CB = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong, ctypes.c_ulong,
-                            ctypes.POINTER(RECT), ctypes.c_double)
+    CB = _MON_CB               # 结构/回调签名在模块级（见 _MonInfo）
 
     def cb(hmon, hdc, lprc, data):
-        mi = MONITORINFO()
-        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        mi = _MonInfo()
+        mi.cbSize = ctypes.sizeof(_MonInfo)
         USER32.GetMonitorInfoW(hmon, ctypes.byref(mi))
         if mi.rcMonitor.r > overlapped[0]:
             overlapped[0] = mi.rcMonitor.r
@@ -306,7 +324,7 @@ def capture(hwnd) -> tuple[bytes, int, int] | None:
     hdc = USER32.GetWindowDC(hwnd)
     mem = GDI32.CreateCompatibleDC(hdc)
     bmp = GDI32.CreateCompatibleBitmap(hdc, w, h)
-    GDI32.SelectObject(mem, bmp)
+    prev = GDI32.SelectObject(mem, bmp)   # 被换下去的默认位图，删之前要换回来
     ok = USER32.PrintWindow(hwnd, mem, 2)
 
     class BMIH(ctypes.Structure):
@@ -319,6 +337,12 @@ def capture(hwnd) -> tuple[bytes, int, int] | None:
     bmi = BMIH(40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
     buf = ctypes.create_string_buffer(w * h * 4)
     GDI32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bmi), 0)
+    # 先把位图从 DC 上摘下来再 DeleteObject：位图**仍被选中**时 DeleteObject
+    # 必返回 0（MSDN: "currently selected into a DC"），而紧接着的 DeleteDC
+    # 也不会替你回收它 —— 每张截图静默漏一个 GDI 句柄。单进程 GDI 上限 1 万，
+    # 按 30 分钟一轮的节奏约 200 天触顶，之后 PrintWindow/截图全线失败且
+    # 日志里没有任何线索。GetDIBits 的调用时机保持原样（选中状态不变）。
+    GDI32.SelectObject(mem, prev)
     GDI32.DeleteObject(bmp)
     GDI32.DeleteDC(mem)
     USER32.ReleaseDC(hwnd, hdc)

@@ -72,6 +72,30 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 # ---------------- 基础工具 ----------------
+def _autostart_valid_count() -> int:
+    """回读 HKCU Run：统计「6 项在册且 exe/脚本路径都可达」的自启项数。
+
+    step_autostart 与 do_check(--check) 原来把这 16 行一字不差复制了两份
+    （第 1 轮报的复制粘贴块）：校验口径迟早分叉，改一处漏一处。统一到这里。
+    异常**原样上抛**，由调用方决定是 fail() 终止、还是「照常展示 0」。
+    """
+    good = 0
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+        i = 0
+        while True:
+            try:
+                name, value, _ = winreg.EnumValue(key, i)
+            except OSError:
+                break
+            i += 1
+            if name in AUTOSTART.values():
+                parts = value.strip('"').split('" "')
+                if all(Path(p.replace("\\\\", "\\")).exists() for p in parts[:2]):
+                    good += 1
+    return good
+
+
 def say(msg: str = "") -> None:
     print(msg, flush=True)
 
@@ -331,21 +355,9 @@ def step_autostart() -> bool:
     except Exception as e:                                  # noqa: BLE001
         fail(f"写注册表失败: {e!r}")
         return False
-    # 回读校验：6 项存在且路径可达
-    good = 0
+    # 回读校验：6 项存在且路径可达（口径见 _autostart_valid_count）
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            i = 0
-            while True:
-                try:
-                    name, value, _ = winreg.EnumValue(key, i)
-                except OSError:
-                    break
-                i += 1
-                if name in AUTOSTART.values():
-                    parts = value.strip('"').split('" "')
-                    if all(Path(p.replace("\\\\", "\\")).exists() for p in parts[:2]):
-                        good += 1
+        good = _autostart_valid_count()
     except Exception as e:                                  # noqa: BLE001
         fail(f"回读校验失败: {e!r}")
         return False
@@ -443,23 +455,10 @@ def do_check() -> int:
         detail = repr(e)
     results.append((f"fp.config.json（{detail}）", cfg_ok))
 
-    good = 0
     try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            i = 0
-            while True:
-                try:
-                    name, value, _ = winreg.EnumValue(key, i)
-                except OSError:
-                    break
-                i += 1
-                if name in AUTOSTART.values():
-                    parts = value.strip('"').split('" "')
-                    if all(Path(p.replace("\\\\", "\\")).exists() for p in parts[:2]):
-                        good += 1
+        good = _autostart_valid_count()     # 与 step_autostart 同一口径
     except Exception:                                       # noqa: BLE001
-        pass
+        good = 0
     results.append((f"开机自启 {good}/6（路径可达）", good == 6))
 
     try:

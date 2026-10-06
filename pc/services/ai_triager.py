@@ -87,16 +87,27 @@ PENDING_TTL = 900
 RETRY_INTERVAL = 15        # flush_pending 的重试节拍（抽成常量：测试要能调快）
 
 
-def _enqueue_pending(title: str, message: str) -> None:
-    """硬规则推送失败进重发队列（与 fp-vps / AI 重要同款语义；无按钮无快照）。
+def _enqueue_pending(st: dict, title: str, message: str,
+                     actions=None, pid=None) -> None:
+    """推送失败进重发队列 —— 硬规则（测试/提及/必推词/VPS）与 AI 重要共用。
 
     P1：@提及/必推词/测试是用户显式要的消息 —— 隧道抖动窗口里 FAIL 即丢
     与「推失败进 pending」不变量相悖。flush_pending 每 15s 重试一条。
+
+    「队满丢最旧一条」原先有三份口径：这里那份不清理快照，fp-vps 分支和
+    AI 重要分支又各自内联了一遍（带清理，其中只有重要分支留日志）。收敛成
+    一份：丢弃时同步 pop 掉它的 👍/👎 快照（st["pushes"]），否则那个 push_id
+    的快照要在 state 里白躺 7 天 TTL，点了还回一条早已放弃的消息；丢弃必留
+    日志，不能悄悄吞。
     """
     if len(_push_pending) >= PENDING_CAP:
-        _push_pending.pop(0)
+        dropped = _push_pending.pop(0)
+        if dropped.get("pid"):
+            st.setdefault("pushes", {}).pop(dropped["pid"], None)
+        log(f"push queue full, dropped oldest "
+            f"push_id={dropped.get('pid')} [{dropped.get('title')}]")
     _push_pending.append({"title": title, "message": message,
-                          "actions": None, "pid": None, "ts": time.time()})
+                          "actions": actions, "pid": pid, "ts": time.time()})
 
 
 def log(msg):
@@ -413,7 +424,7 @@ async def handle_event(client, st, topic, ev):
         ok = await push_phone(client, f"[测试] {src}", content[:200])
         log(f"TEST_PUSH {'ok' if ok else 'FAIL'} [{src}] {content[:50]}")
         if not ok:
-            _enqueue_pending(f"[测试] {src}", content[:200])
+            _enqueue_pending(st, f"[测试] {src}", content[:200])
         return
 
     # 声明式来源规则（fp.config.json 的 apps 块，fpconfig.rules_for）——
@@ -449,7 +460,7 @@ async def handle_event(client, st, topic, ev):
         ok = await push_phone(client, f"[提及] {src}", content[:200])
         log(f"MENTION_PUSH {'ok' if ok else 'FAIL'} [{src}] {content[:50]}")
         if not ok:
-            _enqueue_pending(f"[提及] {src}", content[:200])
+            _enqueue_pending(st, f"[提及] {src}", content[:200])
         return
 
     # 声明式必推词：命中即推（与 @提及 同级硬规则，绕过 AI + dedup）
@@ -463,7 +474,7 @@ async def handle_event(client, st, topic, ev):
         ok = await push_phone(client, f"[规则] {src}", content[:200])
         log(f"RULE_PUSH {'ok' if ok else 'FAIL'} [{src}] hit={mp_hit} | {content[:50]}")
         if not ok:
-            _enqueue_pending(f"[规则] {src}", content[:200])
+            _enqueue_pending(st, f"[规则] {src}", content[:200])
         return
 
     # P2-6: fp-vps 是硬规则通道 —— vps_monitor 的 docstring 承诺「直接推
@@ -480,13 +491,7 @@ async def handle_event(client, st, topic, ev):
         msg = f"{content[:200]}\n— VPS 硬规则，绕过 AI 直推"
         ok = await push_phone(client, f"[VPS] {title or '硬规则'}", msg)
         if not ok:
-            if len(_push_pending) >= PENDING_CAP:
-                dropped = _push_pending.pop(0)
-                if dropped.get("pid"):
-                    st["pushes"].pop(dropped["pid"], None)
-            _push_pending.append({"title": f"[VPS] {title or 'fp-vps'}",
-                                  "message": msg, "actions": None,
-                                  "pid": None, "ts": time.time()})
+            _enqueue_pending(st, f"[VPS] {title or 'fp-vps'}", msg)
         log(f"HARD_PUSH {'ok' if ok else 'FAIL->pending'} [{src}] {content[:50]}")
         return
 
@@ -572,16 +577,9 @@ async def handle_event(client, st, topic, ev):
             # P1-2：失败不等于放弃 —— 挂进重发队列，flush_pending 每 15s 重试。
             # 原实现是「失败即 pop 按钮快照」，断网窗口里的重要推送和它的
             # 👍/👎 一起永久丢失。只有 PENDING_TTL 超时才清快照（在 flush 里）。
-            if len(_push_pending) >= PENDING_CAP:
-                dropped = _push_pending.pop(0)
-                if dropped.get("pid"):
-                    st["pushes"].pop(dropped["pid"], None)
-                log(f"push queue full, dropped oldest "
-                    f"push_id={dropped.get('pid')} [{dropped.get('title')}]")
-            _push_pending.append({"title": src, "message": msg,
-                                  "actions": actions,
-                                  "pid": pid if actions else None,
-                                  "ts": time.time()})
+            # 队满时丢最旧 + 清快照 + 留日志已收敛到 _enqueue_pending。
+            _enqueue_pending(st, src, msg, actions=actions,
+                             pid=pid if actions else None)
         log(f"{'PUSHED' if ok else 'PUSH_FAIL'} [{src}] {reason} "
             f"push_id={pid} {'+fb' if actions else ''} | {content[:50]}")
     else:

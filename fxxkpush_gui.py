@@ -21,8 +21,8 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os                     # open_dir 的 os.startfile 用（原来漏 import）
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -161,7 +161,11 @@ def _autostart_state() -> dict:
 
 
 def _form_from_config() -> dict:
-    cfg = fpconfig.raw(force=True) or {}
+    # 只读路径用 mtime 缓存（raw()），不 force：本函数被 get_status 每 2.5s
+    # 调一次，force 会让「读状态」每次都真读盘+解析整个 fp.config.json，
+    # 等于把 fpconfig 的 mtime 缓存彻底绕开（get_status 里那次 force 同理）。
+    # 配置被改过时 mtime 一变就重读，新鲜度与 force 完全一致。
+    cfg = fpconfig.raw() or {}
     vps = cfg.get("vps") or {}
     ai = cfg.get("ai") or {}
     ntfy = cfg.get("ntfy") or {}
@@ -267,11 +271,17 @@ def _job_check() -> None:
 
 
 def _spawn(name: str, fn, *a) -> dict:
+    # 检查与置位必须在同一把锁里（TOCTOU）：原实现先在锁内读 state、
+    # 出了锁再 _set_job("queued")，两次连点能同时通过「该任务已在运行」
+    # 这道闸 —— 起两份 start_services（它自己的 O_EXCL 单例锁只保住了一份，
+    # 第二份会打印「已在运行」并把 job 状态改掉，前端看到的结果是假的）。
+    # queued 也算占位：置位到线程真正把 state 改成 running 之间只有微秒，
+    # 但那正是原实现的漏洞窗口。
     with _jobs_lock:
         cur = _jobs.get(name)
-        if cur and cur.get("state") == "running":
+        if cur and cur.get("state") in ("queued", "running"):
             return {"ok": False, "msg": "该任务已在运行"}
-    _set_job(name, state="queued", detail="排队中")
+        _jobs[name] = {"ts": time.time(), "state": "queued", "detail": "排队中"}
     threading.Thread(target=fn, args=a, daemon=True).start()
     return {"ok": True, "msg": "已开始"}
 
@@ -380,7 +390,7 @@ class Api:
                     scripts[s] = scripts.get(s, 0) + 1
         hcode, htext = _health()
         wd_tail = _tail(ROOT / "pc" / "logs" / "watchdog.log", 1)
-        cfg = fpconfig.raw(force=True) or {}
+        cfg = fpconfig.raw() or {}          # 只读 + 2.5s 轮询：走 mtime 缓存
         vision_keys = [k for k in ((cfg.get("vision") or {})) if k != "settings"]
         return {
             "running": bool(scripts),

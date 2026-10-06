@@ -21,7 +21,6 @@ watchdog 连打两条「告警两条通道都失败！」。所以还有第三�
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -148,8 +147,13 @@ def _health_cli() -> httpx.Client:
 
 def check_health() -> tuple[bool, str]:
     try:
+        # 空 token 不带头（与 pc_subscriber/_auth、start_services.wait_health
+        # 同一契约）：空 ``Bearer `` 是 httpx 的非法头值，抛 LocalProtocolError
+        # —— 结果恒为「health 红」，而同一时刻不带头的 wait_health 拿到的是
+        # 200（/v1/health 不鉴权）。也就是 token 一抖动就必出假告警。
+        tok = _token()
         r = _health_cli().get(HEALTH_URL,
-                              headers={"Authorization": f"Bearer {_token()}"})
+                              headers={"Authorization": f"Bearer {tok}"} if tok else {})
         if r.status_code == 200:
             return True, "health=200"
         return False, f"health=HTTP {r.status_code}"
@@ -510,8 +514,12 @@ def _ntfy_payload(title: str, message: str) -> dict:
 def push_local(payload: dict) -> bool:
     """本地隧道（快）。隧道挂了这里必然失败 —— 由 push_vps 兜底。"""
     try:
+        # 同 check_health：空 token 时不带头。空 ``Bearer `` 是非法头值，
+        # httpx 直接抛 LocalProtocolError —— 不带头则拿到服务端的真实答复
+        # （403/401 一样返回 False，但日志里看得出是鉴权而不是传输炸了）。
+        tok = _token()
         r = httpx.post(f"{NTFY_BASE}/", json=payload,
-                       headers={"Authorization": f"Bearer {_token()}"},
+                       headers={"Authorization": f"Bearer {tok}"} if tok else {},
                        timeout=8, trust_env=False)
         # r8 P1-3③：记下服务端分配的 message id —— 「已送达」原来只证明
         # 收到 200，事后想和手机端对账（到底推的哪条）没有抓手。

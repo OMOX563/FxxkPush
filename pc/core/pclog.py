@@ -216,7 +216,10 @@ def _trim_inplace(path, keep: int) -> None:
     r+b 截断不要求文件独占，跨进程句柄挡住 rename 时这是唯一还能生效的
     收缩手段（r7-5 硬上界）。"""
     with Path(path).open("r+b") as f:
-        size = path.stat().st_size if False else f.seek(0, 2)
+        # f.seek(0, 2) 本身就是文件大小；原写法是 ``path.stat().st_size if False
+        # else ...`` —— 永假分支 + 分支里那次多余的 stat（纯死代码，还多一次
+        # 系统调用），语义与直接取 seek 结果完全一致。
+        size = f.seek(0, 2)
         if size <= keep:
             return
         f.seek(size - keep)

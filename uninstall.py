@@ -95,6 +95,14 @@ def warn(msg: str) -> None:
     say(f"  [!!] {msg}")
 
 
+# 与 setup.py 的同名辅助保持一致。原来漏了这个定义：step_stop / step_autostart
+# 的**失败分支**（杀不掉进程、读 Run 键失败、删值失败）一执行就是 NameError，
+# 异常冒到 main 之外 —— 卸载打不出那句「仍有 N 个进程未退出」，用户只看到
+# traceback，还以为卸载工具本身坏了（错误分支恰好是最需要说明的分支）。
+def fail(msg: str) -> None:
+    say(f"  [X ] {msg}")
+
+
 def run_ps(cmd: str, timeout: int = 60) -> tuple[int, str]:
     try:
         p = subprocess.run(

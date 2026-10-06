@@ -11,7 +11,6 @@ the same single config the PC services read (never committed to git).
 """
 import sys
 import os
-import stat
 import time
 from pathlib import Path
 
@@ -62,6 +61,7 @@ def put(cli, local, remote, retries=3):
     want = os.path.getsize(local)
     last_err = None
     for attempt in range(1, retries + 1):
+        sftp = None
         try:
             sftp = cli.open_sftp()
             tmp = remote + ".tmp"
@@ -75,7 +75,6 @@ def put(cli, local, remote, retries=3):
                 pass
             sftp.rename(tmp, remote)
             final = sftp.stat(remote).st_size
-            sftp.close()
             if final != want:
                 raise IOError(f"rename mismatch: {final} of {want} bytes")
             print(f"uploaded {local} -> {remote} ({final} bytes)")
@@ -84,14 +83,28 @@ def put(cli, local, remote, retries=3):
             last_err = e
             print(f"upload attempt {attempt}/{retries} failed: {e!r}", file=sys.stderr)
             time.sleep(3)
+        finally:
+            # 失败重试路径原来**不关 channel**：3 次尝试就是 3 个挂着的
+            # SFTP channel，全堆在一个进程里直到退出。close 幂等，成功路径
+            # 上的显式 close 一并去掉，只留这一处（顺序：先算 final 再关）。
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
     raise SystemExit(f"upload failed after {retries} attempts: {last_err!r}")
 
 
 def get(cli, remote, local):
     sftp = cli.open_sftp()
-    sftp.get(remote, local)
-    print(f"downloaded {remote} -> {local}")
-    sftp.close()
+    try:
+        sftp.get(remote, local)
+        print(f"downloaded {remote} -> {local}")
+    finally:
+        try:
+            sftp.close()
+        except Exception:
+            pass
 
 
 def main():

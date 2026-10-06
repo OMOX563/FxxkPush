@@ -74,8 +74,15 @@ def save_state():
 def allowed(kind, cooldown=COOLDOWN_DEFAULT):
     """True if this push kind is outside its cooldown window."""
     last = _state["cooldowns"].get(kind, 0)
+    # P2-8 同型：cooldowns 是 dict 但值没人校，手改成 "昨天" / null 后
+    # `now - last` 直接 TypeError -> 每轮 monitor-error，硬规则一条都发不出。
+    if not isinstance(last, (int, float)) or isinstance(last, bool):
+        last = 0
     now = time.time()
-    if now - last >= cooldown:
+    # r7-8 同型（PC 侧 watchdog._elapsed）：NTP/手动把时钟往回拨后 last 落在
+    # 未来，now-last 为负 -> 恒小于 cooldown -> 冷却追平之前该类告警一条都
+    # 发不出去（ssh-login 冷却 24h，等于静音一整天）。负差按「已过期」处理。
+    if now < last or now - last >= cooldown:
         _state["cooldowns"][kind] = now
         _state["counts"][kind] = 0
         return True
@@ -125,8 +132,11 @@ def _gray_write(line: str) -> None:
             bak = GRAY_LOG.with_name(GRAY_LOG.name + ".1")
             bak.unlink(missing_ok=True)
             GRAY_LOG.replace(bak)
-    except Exception:
-        pass
+    except Exception as e:
+        # 轮转失败必须留痕（PC 侧 r7-5 的同款教训）：原来 except: pass，
+        # 文件无限涨却查不到原因。继续往下 append —— 这一行不能因为轮转
+        # 失败而丢，下次写入会再试一次轮转。
+        print(f"gray.log rotate failed: {e!r}", flush=True)
     with GRAY_LOG.open("a", encoding="utf-8") as f:
         f.write(line if line.endswith("\n") else line + "\n")
 
@@ -275,12 +285,21 @@ def main():
         # judges their age. Startup counts as t=0 so the first heartbeat
         # goes out on the first loop.
         if loop_start - last_hb >= HB_INTERVAL:
-            _publish(TOPIC_HB, "hb",
-                     json.dumps({"ts": int(loop_start),
-                                 "load": round(os.getloadavg()[0], 2)},
-                                ensure_ascii=False),
-                     priority=1, tags=["heartbeat"])
-            last_hb = loop_start
+            try:
+                _publish(TOPIC_HB, "hb",
+                         json.dumps({"ts": int(loop_start),
+                                     "load": round(os.getloadavg()[0], 2)},
+                                    ensure_ascii=False),
+                         priority=1, tags=["heartbeat"])
+            except Exception as e:
+                # _publish 的 curl 带 timeout=30 —— 超时抛的是 TimeoutExpired
+                # **异常**，不是返回值；这一行原来在所有 try 之外，一炸就穿透
+                # main → 监控进程退出（磁盘/OOM/SSH/unit 全停），而 PC 侧对
+                # VPS 监控零覆盖，这一崩就全盲。失败不更新 last_hb：下一轮
+                # （60s）接着试，不会因为一次超时丢掉整段心跳节奏。
+                print(f"heartbeat publish failed: {e!r}", flush=True)
+            else:
+                last_hb = loop_start
         try:
             save_state()
         except Exception as e:

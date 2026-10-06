@@ -66,6 +66,12 @@ PENDING_TTL = 900         # 15 分钟还没推出去就放弃：更旧的通知�
 # 没有消费者 —— 它一死，四项巡检连同三层告警一起静默失效。
 HB_FILE = Path(__file__).resolve().parents[1] / "logs" / "watchdog.hb"  # pc/logs
 _hb_alert_at = 0.0
+# 必须在模块级给默认值：原来只在 check_watchdog_hb 的 global 声明里赋值，
+# 而 main 的心跳行 ``f"...{_hb_ok}..."`` 要等 tick%60 那次检查先跑过才安全 ——
+# 一旦 check_watchdog_hb 在赋值前抛出（或调用次序被改动），心跳行就是
+# NameError → 冒到 asyncio.run 之外 → 整个 listener 被 excepthook os._exit。
+# None = 尚未观测（心跳行如实打 unknown）。
+_hb_ok: bool | None = None
 _seen_dirty = False       # save_seen 失败时置 True，下一轮继续重试落盘
 
 
@@ -108,7 +114,14 @@ def is_our_toast(texts) -> bool:
                 # 原来这里会冒泡到外层 except -> return False，之后窗口期内
                 # 自己弹出的 toast 全被当成新通知，直接重推一遍。
                 continue
-            if rec.get("ts", 0) < cutoff:
+            # ts 也要校型：echo 记录是 append-only 的 jsonl，半行/手改出
+            # "ts": "2026-09-..." 时 `str < float` 抛 TypeError，被下面的
+            # 外层 except 接住 -> 整次回环检测直接 return False（窗口期内
+            # 自己弹的 toast 全被当成新通知重推一遍）。坏行跳过即可，
+            # 与 replay_failed / fp_feedback.stats 的同型防护对齐。
+            ts = rec.get("ts")
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool) \
+                    or ts < cutoff:
                 continue
             fp = _norm(f'{rec.get("title", "")} {rec.get("msg", "")}')[:200]
             if fp and (fp == incoming or fp in incoming or incoming in fp):
@@ -118,8 +131,6 @@ def is_our_toast(texts) -> bool:
     return False
 
 
-sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
-                str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fp_feedback/alert_fallback
 import pclog
 LOG = pclog.get_logger("notification_listener")
 
@@ -325,7 +336,13 @@ def replay_failed(cap: int = 20) -> None:
     for rec in latest.values():
         if rec.get("pushed") is not False:
             continue
-        age = now - (rec.get("ts") or 0)
+        # ts 校型：脏值（半行 JSON / 手改）会让 `now - ts` 抛 TypeError，
+        # 而 replay_failed() 调用点在主循环 **之外** —— 一炸就是
+        # asyncio.run → excepthook → os._exit，整个 listener 启动即死。
+        ts = rec.get("ts")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            continue
+        age = now - ts
         if age > PENDING_TTL or age < 0:
             continue      # 太旧不补；负数 = 时间回拨过的脏数据，跳过 (r7-8)
         if done >= cap:
@@ -477,8 +494,14 @@ async def main():
             log(f"补发停机窗口内到达的 {len(pre)} 条通知")
     _seen_dirty = not save_seen(seen)
 
-    # P1-2：上次运行推失败（pushed:false）的补一轮
-    replay_failed()
+    # P1-2：上次运行推失败（pushed:false）的补一轮 —— 纯补充动作，绝不能
+    # 把服务带倒：它的调用点在主循环之外，任何一处异常都会冒到 asyncio.run
+    # → excepthook → os._exit(1)，通知监听启动即死（要等 watchdog 计数归零
+    # + 日志静默才 revive，中间的通知全丢）。
+    try:
+        replay_failed()
+    except Exception as e:
+        log(f"replay_failed 异常(已隔离，不影响主循环): {e!r}")
 
     tick = 0
     while True:
@@ -499,17 +522,23 @@ async def main():
         except Exception as e:
             log(f"poll error: {e!r}")
         tick += 1
-        if tick % 60 == 0:              # 每 3 分钟看一眼看门狗还活着没
-            check_watchdog_hb()
-        if tick % 200 == 0:             # P2-4：每 10 分钟复查 WinRT 权限
-            check_access()
-        if tick % 100 == 0:
-            # r7-10：事件驱动 + WinRT 权限被撤后 get_notifications 返回空也
-            # 不留痕，「活着但没干活」和「健康」在日志上完全同形（实测 6 小时
-            # 才 74 行）。每 5 分钟一条固定心跳，watchdog 的 quiet 检查才有
-            # 判据可依。
-            log(f"idle heartbeat: seen={len(seen)} pending={len(_pending)} "
-                f"watchdog_hb={'ok' if _hb_ok is True else ('STALE' if _hb_ok is False else 'unknown')}")
+        try:
+            if tick % 60 == 0:              # 每 3 分钟看一眼看门狗还活着没
+                check_watchdog_hb()
+            if tick % 200 == 0:             # P2-4：每 10 分钟复查 WinRT 权限
+                check_access()
+            if tick % 100 == 0:
+                # r7-10：事件驱动 + WinRT 权限被撤后 get_notifications 返回空也
+                # 不留痕，「活着但没干活」和「健康」在日志上完全同形（实测 6 小时
+                # 才 74 行）。每 5 分钟一条固定心跳，watchdog 的 quiet 检查才有
+                # 判据可依。
+                log(f"idle heartbeat: seen={len(seen)} pending={len(_pending)} "
+                    f"watchdog_hb={'ok' if _hb_ok is True else ('STALE' if _hb_ok is False else 'unknown')}")
+        except Exception as e:
+            # 周期检查原先在主循环的 try **之外**：任何一处抛异常都会一路冒到
+            # asyncio.run → excepthook → os._exit(1)，整个 listener 没了。
+            # 与 r8 P1-2「单点异常不许带走巡检循环」同一条边界。
+            log(f"periodic check error: {e!r}")
         await asyncio.sleep(POLL_SEC)
 
 
