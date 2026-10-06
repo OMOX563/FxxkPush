@@ -49,6 +49,7 @@ def _detect_root() -> Path:
 ROOT = _detect_root()
 sys.path.insert(0, str(ROOT / "pc" / "core"))
 import fpconfig  # noqa: E402
+import pclog  # noqa: E402   # 只用 read_tail（不 get_logger，GUI 不该持有任何服务的日志句柄）
 
 # pythonw 而非 python.exe：python.exe 是控制台程序 —— 自启注册成它
 # 会在登录时弹 6 个黑窗；pythonw 无窗口子系统，双击 GUI 也绝不带控制台。
@@ -79,6 +80,15 @@ PS_KILL = (
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+# 会动服务进程（杀/起）的任务：彼此互斥，避免 GUI 上两个操作并发交错
+_EXCLUSIVE = ("start", "stop", "uninstall")
+
+# 子进程都是本项目自己的 Python 脚本：Windows 上 stdout/err 重定向到管道或文件时
+# 它们按 locale(cp936) 编码写中文，而父进程一律按 utf-8 解码（_job_move 等），或
+# 把字节直接落进用 utf-8 打开的 gui_launcher.log（_job_start）—— 结果是任务详情里
+# 全是乱码、同一个日志里混两种编码。PYTHONIOENCODING 只改子进程 stdio 编码，
+# 不动它的任何行为。（PowerShell 走 _run_ps，不读这个变量，输出本来就是 ASCII。）
+CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 # ---------------- 工具 ----------------
@@ -110,14 +120,67 @@ def _run_ps(cmd: str, timeout: int = 60) -> tuple[int, str]:
         return 1, repr(e)
 
 
-def _tail(path: Path, n: int = 14) -> list[str]:
+def _our_scripts() -> list[str]:
+    """本项目 6 个服务的脚本名（一个 pythonw 进程 = 一项，与 PS_SCRIPTS 同口径）。
+
+    psutil 进程内枚举，替代「get_status 每 2.5s 冷启一次 PowerShell」：GUI 开着
+    期间状态轮询 2.5s 一次，PowerShell 冷启动 1-5s + 几十 MB 工作集，等于常驻一
+    个子进程工厂（watchdog / start_services 的注释里早写过「为什么不用
+    PowerShell」的同一条理由，GUI 这条路一直没跟上）。psutil 不可用（没走 .venv
+    启动）时原样回退 PowerShell，行为不降级。"""
     try:
-        lines = [ln for ln in path.read_text(encoding="utf-8",
-                                              errors="replace").splitlines()
-                 if ln.strip()]
-        return lines[-n:]
+        import psutil
+    except ImportError:
+        rc, out = _run_ps(PS_SCRIPTS)
+        if rc != 0:
+            return []
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+    out: list[str] = []
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info.get("name") or "").lower() != "pythonw.exe":
+                continue
+            cmd = " ".join(proc.cmdline() or [])
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        low = cmd.lower()
+        if "fuckpush\\pc\\" not in low and "fuckpush/pc/" not in low:
+            continue          # 只认自己（含 .venv\\Scripts\\pythonw.exe 那层 shim），Hermes 等不碰
+        m = re.search(r"([a-z_]+\.py)", cmd)
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def _tail(path: Path, n: int = 14) -> list[str]:
+    # pclog.read_tail 只碰尾部 64KB。本函数被 get_status 每 2.5s 调两次
+    # （watchdog.log 是 2MB x3 轮转上限），原来 read_text() 把整个日志读进来再
+    # 只取 14 行 —— GUI 开着就是持续的 4MB/2.5s 整读（与 watchdog.check_link、
+    # pclog.read_tail 的 docstring 点名的是同一个毛病，这里一直是漏网的一处）。
+    return [ln for ln in pclog.read_tail(path, n) if ln.strip()]
+
+
+def _cap_log(path: Path, limit: int = 512 * 1024, keep: int = 128 * 1024) -> None:
+    """gui_launcher.log 没有任何轮转：每次「一键启动」都会把 start_services 的
+    全部输出追进去，_fatal 也写它，长期只增不减（pc/logs 下唯一一个无上界的
+    文本文件 —— 其余都是 RotatingFileHandler 或 append_rotating）。写之前超过
+    limit 就砍到 keep：它是「子进程持着句柄在写」的文件，rename 必然
+    PermissionError（跨进程句柄挡 rename 那个坑），只能就地截断，与
+    pclog.append_rotating 的兜底同思路。
+    失败静默：这只是给下次写腾地方，不值得为它打断启动任务。"""
+    try:
+        if not path.exists() or path.stat().st_size <= limit:
+            return
+        data = path.read_bytes()[-keep:]
+        nl = data.find(b"\n")
+        if nl != -1:                 # 从第一个完整行起保留
+            data = data[nl + 1:]
+        with path.open("r+b") as f:
+            f.seek(0)
+            f.write(data)
+            f.truncate()
     except OSError:
-        return []
+        pass
 
 
 def _read_version() -> str:
@@ -193,11 +256,13 @@ def _job_start() -> None:
         _set_job("start", state="done", rc=2, detail=".venv 不存在，请先跑 setup.bat")
         return
     log_path = ROOT / "pc" / "logs" / "gui_launcher.log"
+    _cap_log(log_path)
     try:
         with open(log_path, "a", encoding="utf-8") as lf:
             p = subprocess.Popen(
                 [str(VENV_PY), str(ROOT / "pc" / "bootstrap" / "start_services.py")],
                 cwd=str(ROOT), stdout=lf, stderr=subprocess.STDOUT,
+                env=CHILD_ENV,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             rc = p.wait(timeout=300)
@@ -228,7 +293,7 @@ def _job_move(mode: str) -> None:
         p = subprocess.run(
             [str(VENV_PY), str(ROOT / "pc" / "services" / "vision_listener.py"), mode],
             input="\n", capture_output=True, text=True, encoding="utf-8",
-            errors="replace", cwd=str(ROOT), timeout=120,
+            errors="replace", cwd=str(ROOT), timeout=120, env=CHILD_ENV,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         lines = [ln for ln in ((p.stdout or "") + (p.stderr or "")).splitlines()
@@ -247,7 +312,7 @@ def _job_uninstall(purge: bool) -> None:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
-                           cwd=str(ROOT), timeout=300,
+                           cwd=str(ROOT), timeout=300, env=CHILD_ENV,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         tail = [ln for ln in ((p.stdout or "").splitlines()) if ln.strip()][-4:]
         _set_job("uninstall", state="done", rc=p.returncode,
@@ -262,6 +327,7 @@ def _job_check() -> None:
         p = subprocess.run([sys.executable, str(ROOT / "setup.py"), "--check"],
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", cwd=str(ROOT), timeout=120,
+                           env=CHILD_ENV,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out = [ln for ln in ((p.stdout or "")).splitlines() if ln.strip()]
         _set_job("check", state="done", rc=p.returncode,
@@ -278,6 +344,17 @@ def _spawn(name: str, fn, *a) -> dict:
     # queued 也算占位：置位到线程真正把 state 改成 running 之间只有微秒，
     # 但那正是原实现的漏洞窗口。
     with _jobs_lock:
+        # 互斥：_spawn 原来只挡「同名任务已在运行」，start 和 stop 分属两个 key，
+        # 连点「一键启动」+「一键停止」会同时进后台 —— start_services 杀旧起新
+        # 与 PS_KILL 撞在一起，结果取决于时序：服务被杀一半、job 状态却报「全部
+        # 就绪」。会动服务进程的三个任务彼此互斥（check/move 只读或只挪窗口，不拦）。
+        if name in _EXCLUSIVE:
+            busy = [k for k in _EXCLUSIVE
+                    if k != name
+                    and (_jobs.get(k) or {}).get("state") in ("queued", "running")]
+            if busy:
+                return {"ok": False,
+                        "msg": f"已有任务在运行（{'、'.join(busy)}），请等它结束"}
         cur = _jobs.get(name)
         if cur and cur.get("state") in ("queued", "running"):
             return {"ok": False, "msg": "该任务已在运行"}
@@ -305,10 +382,36 @@ def _save_config_impl(form: dict) -> dict:
     model = str(form.get("model", "")).strip()
     if not base_url or not model:
         warnings.append("AI 地址/模型为空：AI 分诊将 fail-open（判不了就全推）")
+    # fp.config.json 允许 // 行注释（fpconfig._strip_comments 剥掉后才 json.loads），
+    # 而本函数是 json.dumps 整份重写 —— 用户手写的注释会被静默抹掉。JSON 本身不
+    # 支持注释，重新注入要保留原文结构、风险大于收益，这里先如实警告。
+    try:
+        orig = fpconfig.PATH.read_text(encoding="utf-8")
+        if fpconfig._strip_comments(orig) != orig:
+            warnings.append("fp.config.json 中的 // 注释会在保存后丢失（JSON 不支持注释）")
+    except OSError:
+        pass
     if errors:
         return {"ok": False, "errors": errors, "warnings": warnings}
 
-    cfg = copy.deepcopy(fpconfig.raw(force=True) or {})
+    # 覆盖保护：raw(force=True) 在「读不到（AV 独占/半写）」和「JSON 解析失败
+    # （半写、手改坏）」两种情况下都返回 {} —— 与「文件不存在」同形。此时若照常
+    # 往下写，就是用表单里那几个字段**整份覆盖** fp.config.json：vision 目标、
+    # apps 规则、以及「留空=保持原值」的 password/token/api_key（原值已经没了）
+    # 全部蒸发，而界面上只显示「已保存」。读不出原文就拒绝保存，让用户重试。
+    raw_cfg = fpconfig.raw(force=True)
+    if not raw_cfg and fpconfig.PATH.exists():
+        try:
+            text = fpconfig.PATH.read_text(encoding="utf-8")
+        except OSError:
+            text = None
+        # 文本为空 = 首次配置的空壳，允许从零写入；有内容却解析不出来才是读失败
+        if text is None or text.strip():
+            return {"ok": False,
+                    "errors": ["fp.config.json 当前读不出来（可能被占用 / 内容不"
+                               "是合法 JSON），为避免覆盖已有配置本次未保存 —— "
+                               "请稍后重试"]}
+    cfg = copy.deepcopy(raw_cfg or {})
     changed: list[str] = []
 
     def _put(section: str, key: str, value) -> None:
@@ -381,13 +484,9 @@ except ImportError as e:                                        # pragma: no cov
 
 class Api:
     def get_status(self) -> dict:
-        rc, out = _run_ps(PS_SCRIPTS)
         scripts: dict[str, int] = {}
-        if rc == 0:
-            for ln in out.splitlines():
-                s = ln.strip()
-                if s:
-                    scripts[s] = scripts.get(s, 0) + 1
+        for s in _our_scripts():
+            scripts[s] = scripts.get(s, 0) + 1
         hcode, htext = _health()
         wd_tail = _tail(ROOT / "pc" / "logs" / "watchdog.log", 1)
         cfg = fpconfig.raw() or {}          # 只读 + 2.5s 轮询：走 mtime 缓存

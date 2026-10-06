@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -70,7 +71,12 @@ def push_vps(payload: dict, log) -> bool:
         # {tok} 是真 token：这行曾被脱敏误写成字面 *** → 第2层自抽出起恒 401
         # （watchdog.log 7 次 rejected、VPS-SSH兜底送达 0 次），隧道死但 SSH 通
         # 的经典故障里手机收不到任何远程告警。
-        auth = f"-H 'Authorization: Bearer {tok}' " if tok else ""
+        # shlex.quote：这一段整条进远端 shell。裸单引号包 token 时，只要 token
+        # 里带一个 '（setup 向导并不校验 token 内容）整条命令就引号不闭合 ——
+        # 正是上面那句「单引号必须是偶数否则 push_vps 恒返回 False」的形态，
+        # 第2层兜底静默失效。quote 之后任何内容都能安全过 shell；常规 tk_ token
+        # 的输出与原来逐字节相同（仍是 'Authorization: Bearer tk_xxx'）。
+        auth = f"-H {shlex.quote('Authorization: Bearer ' + tok)} " if tok else ""
         # 远端临时文件按**本地 pid** 命名：这条第二层兜底由 watchdog 和
         # notification_listener 共用（P2-5），两边都写固定
         # /tmp/fp_watchdog_alert.json 就是双写竞争 —— A 刚写完 B 覆盖掉、

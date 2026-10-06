@@ -133,11 +133,13 @@ _health_client: httpx.Client | None = None
 
 
 def _health_cli() -> httpx.Client:
-    """复用同一个 Client：顶层 httpx.get() 每次都新建连接池并初始化，
-    实测 654ms + 458KB 读 + 泄漏 4 个句柄/次（60 次/小时 = 240 句柄/小时，
-    Windows 单进程 10k 句柄限制下约 40 小时触顶）。trust_env 在构造时固定
-    为 False，之后系统代理怎么翻转都不影响本连接 —— 这正是复用安全的前提。
-    """
+    """复用同一个 Client：顶层 httpx.get() 每次都要新建 Client + 连接池并
+    初始化（实测 654ms / 次，本检查每 60s 一次）。R2 更正：httpx 0.28 的顶层
+    API 内部是 ``with Client(...)``，退出时会 close 连接池，所以那版注释里
+    「泄漏 4 个句柄/次、40 小时触顶」的说法不成立 —— 复用省的是每次的
+    建连开销，不是堵泄漏（这条别再被拿去当「必须复用」的论据）。
+    trust_env 在构造时固定为 False，之后系统代理怎么翻转都不影响本连接 ——
+    这正是复用安全的前提。"""
     global _health_client
     if _health_client is None or _health_client.is_closed:
         _health_client = httpx.Client(trust_env=False,

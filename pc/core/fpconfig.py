@@ -113,6 +113,20 @@ def ai() -> dict:
     sec = raw().get("ai")
     if isinstance(sec, dict):
         cfg.update({k: v for k, v in sec.items() if v is not None})
+    # 数值收敛（与 vision() 的 _num 同型）：手改配置把 dedup_window_sec /
+    # max_tokens 写成 "1800"、"abc"、true 时，ai_triager.dedup_check 的
+    # ``now - v > win`` 直接 TypeError —— 而它在 handle_event 的 try 里，
+    # 表现是**每条消息 handle failed**、去重与 AI 路径全废但服务看着活着；
+    # max_tokens 类型不对则被模型端直接拒。非数值一律回退默认。
+    for k in ("max_tokens", "max_completion_tokens", "dedup_window_sec"):
+        v = cfg.get(k)
+        if isinstance(v, bool):
+            cfg[k] = AI_DEFAULTS[k]
+            continue
+        try:
+            cfg[k] = int(v)
+        except (TypeError, ValueError):
+            cfg[k] = AI_DEFAULTS[k]
     return cfg
 
 

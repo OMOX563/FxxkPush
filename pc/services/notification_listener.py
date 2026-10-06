@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -367,6 +368,18 @@ _access_alert_at = 0.0
 
 
 def _push_alert(title: str, message: str) -> bool:
+    # 告警自带一个新 trace，但必须用 with 恢复（watchdog._ntfy_payload 同款）：
+    # tags_with_trace 在无 trace 时会**生成并绑定**，而本函数由主循环直接调用、
+    # 外层没有 with —— 不恢复的话第一次告警之后，心跳 / 轮询 / 重连日志全都挂上
+    # 那次告警的 trace，grep 心跳会串到无关告警上（pclog.tags_with_trace 的
+    # docstring 点名的坑；R1 只在 watchdog._ntfy_payload 那侧修了，listener
+    # 这侧的 _push_alert 漏了）。顺带保住告警自身各层日志与 payload 同 trace。
+    tid = pclog.get_trace_id()
+    with pclog.trace(None if tid == "-" else tid):
+        return _push_alert_impl(title, message)
+
+
+def _push_alert_impl(title: str, message: str) -> bool:
     """P2-5：listener 的告警原来只有本地隧道一条通道 —— 「看门人已死」的
     时刻隧道（同为 ntfy 链路）很可能也死了，单通道 = 静默。复用 watchdog 的
     三层降级，每层各自 try（P1-2 同款边界，一层失败只降级不击穿）。"""
@@ -401,6 +414,24 @@ def _push_alert(title: str, message: str) -> bool:
     return False
 
 
+def _alert_bg(title: str, message: str) -> None:
+    """三层降级最坏 ~55s（隧道 10s + SSH 25s + PowerShell 20s），而它的两个
+    调用点都在 asyncio 事件循环调用的同步巡检函数里 —— 同步等会把 WinRT 轮询、
+    心跳行、看门狗交叉检查一起卡住（poll 停摆最长 55s，窗口内到达的通知要等
+    下一轮才被取走；多个巡检项叠着触发时更久）。
+
+    告警本来就不需要同步结果（两个调用点都不接返回值），丢后台线程即可；线程
+    内异常自吞留痕，绝不冒到主循环（与主循环那条「单点异常不许带走巡检」的
+    边界一致）。线程自带干净 context，trace 绑定天然不会漏回主循环，
+    _push_alert 自己那个 with 是第二道保险。"""
+    def _run() -> None:
+        try:
+            _push_alert(title, message)
+        except Exception as e:
+            log(f"alert dispatch failed: {e!r}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def check_access() -> None:
     """P2-4：WinRT 权限只在启动时 request_access_async 查过一次；运行中被
     系统撤掉后 get_notifications 恒返回空 —— 零异常、心跳照打、quiet/link
@@ -419,7 +450,7 @@ def check_access() -> None:
         return          # 同一故障 30 分钟一次（同 check_watchdog_hb 的节流）
     _access_alert_at = time.time()
     LOG.error(f"WinRT 通知访问权限被撤 (status={st}) —— 新通知不再进分诊，心跳照打也是空转")
-    _push_alert(
+    _alert_bg(
         "[FxxkPush] 通知访问权限被撤",
         "系统撤掉了通知监听权限，Windows 通知不再进入分诊，"
         "QQ/微信等新通知会静默丢失。\n"
@@ -451,7 +482,7 @@ def check_watchdog_hb() -> None:
     _hb_alert_at = time.time()
     LOG.error(f"watchdog 心跳 {int(age)}s 未更新 —— 看门狗可能已死，告警能力失效")
     # P2-5：单通道在「看门人已死」场景下不可靠 —— 走三层降级（local→VPS→toast）
-    _push_alert(
+    _alert_bg(
         "[FxxkPush] watchdog 心跳超时",
         f"watchdog.hb 已 {int(age // 60)} 分钟未更新，看门狗可能已退出："
         f"health/procs/link/disk 四项巡检与三层告警同时失效。\n"
@@ -486,7 +517,9 @@ async def main():
         for ev in pre[:30]:
             # r7-4：原实现忽略返回值 —— 断网时启动补发整批静默失败，
             # 既不入 _pending 也无本轮重试，等于要再重启一次才补得出来。
-            if not publish(ev):
+            # to_thread：publish 是同步 httpx(timeout=10) + 归档写盘，直接跑
+            # 在事件循环上会把 poll/心跳一起卡住（断网时 30 条 = 最坏 300s）。
+            if not await asyncio.to_thread(publish, ev):
                 _enqueue(ev)
         if len(pre) > 30:
             log(f"补发最近 30 条，丢弃其余 {len(pre) - 30} 条 pre-existing")
@@ -499,7 +532,9 @@ async def main():
     # → excepthook → os._exit(1)，通知监听启动即死（要等 watchdog 计数归零
     # + 日志静默才 revive，中间的通知全丢）。
     try:
-        replay_failed()
+        # 同上：replay 最多补发 20 条，每条一次同步 HTTP —— 放循环里同步等
+        # 等于服务起来后最多 200s 不轮询（这段时间新通知只在通知中心里堆着）。
+        await asyncio.to_thread(replay_failed)
     except Exception as e:
         log(f"replay_failed 异常(已隔离，不影响主循环): {e!r}")
 
@@ -509,9 +544,12 @@ async def main():
             before = len(seen)
             events = await poll_once(listener, seen)
             for ev in events:
-                if not publish(ev):
+                # 同步 httpx(timeout=10)+写盘放在事件循环里跑：一次断网就是
+                # 每条 10s 的 loop 卡顿，轮询/心跳/交叉检查全停。to_thread
+                # 保序（逐条 await）、不动 _pending/_seen 的归属（仍在主协程）。
+                if not await asyncio.to_thread(publish, ev):
                     _enqueue(ev)     # 失败不丢：进队列，3s 后重试
-            flush_pending()
+            await asyncio.to_thread(flush_pending)
             # 按 seen 是否变化来存，不能只看 events：extract 返回 None 的
             # 通知（IGNORE 名单 / 自己弹的 toast）照样 add 了 id 却不产出
             # events。只在 events 非空时存盘，这批 id 下一轮又是"新的"，

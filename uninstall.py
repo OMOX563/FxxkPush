@@ -19,6 +19,7 @@ VPS 侧任何东西（停用 VPS 见结尾提示）。
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import winreg
@@ -43,6 +44,9 @@ def _detect_root() -> Path:
 ROOT = _detect_root()
 # pythonw：unpark 子进程与自启语义都要无窗口（python.exe 会弹控制台）
 VENV_PY = ROOT / ".venv" / "Scripts" / "pythonw.exe"
+# 子进程 stdout 重定向到管道时按 locale(cp936) 写中文，而本进程按 utf-8 解码 ——
+# unpark 的归位结果在卸载输出里全是乱码。只改子进程 stdio 编码，不动其它行为。
+CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 SA_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 AUTOSTART = {
@@ -210,7 +214,7 @@ def step_unpark(dry: bool) -> bool:
         p = subprocess.run([str(VENV_PY), str(vision), "unpark"],
                            input="\n", capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
-                           cwd=str(ROOT), timeout=120)
+                           cwd=str(ROOT), timeout=120, env=CHILD_ENV)
         tail = [ln for ln in ((p.stdout or "") + (p.stderr or "")).splitlines()
                 if ln.strip()]
         for ln in tail[-8:]:

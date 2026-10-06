@@ -36,13 +36,18 @@ HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
 # 都由 fpconfig 降级成带默认值的 dict —— 原来这里手写的「try + isinstance +
 # setdefault」三道防线就是为导入期无声退出准备的，现在收敛到 fpconfig 一处。
 import fpconfig
-CONFIG = fpconfig.ai()
-# 补齐必需键：即使配置被手改少了字段，也不该在运行中途 KeyError。
-CONFIG.setdefault("model", "云端/本地OCR模型")
-CONFIG.setdefault("dedup_window_sec", 1800)
-CONFIG.setdefault("api_key", "")
-CONFIG.setdefault("base_url", "云端/本地OCR模型端点")
-CONFIG.setdefault("max_tokens", 200)
+
+
+def _ai() -> dict:
+    """当前 AI 配置（fpconfig.ai()：永远带默认值，走 mtime 缓存，正常路径只多一次 stat）。
+
+    原来这里在**导入期**快照成模块常量 CONFIG：fp.config.json 当时缺失/半写
+    （AV 抖动、向导还没跑完）就整进程钉死在「云端/本地OCR模型端点」占位符 +
+    空 api_key 上，**永不自愈** —— 之后每条消息 classify 必失败、全部 fail-open
+    直推（日志每天几千行 classify failed），要重启服务才恢复。ntfy token 正是
+    为同一形态改成了惰性读取（第 5 轮 P2），ai 块一直没跟上。fpconfig 内部的
+    ``if not 空才缓存 / mtime 变了重读`` 语义现在对 ai 块同样生效，与
+    rules_for「改完即刻生效」的热重载口径一致；配置不变时只多一次 stat。"""
 
 NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586")  # via SSH tunnel (see pc/ntfy_tunnel.py)
 # token 惰性读取见下面的 ntfy_token()：fpconfig 非空才缓存、失败/空不缓存，
@@ -277,19 +282,20 @@ def save_state(st):
 
 async def classify(client: httpx.AsyncClient, kind: str, content: str,
                    extra: str = "") -> dict:
+    cfg = _ai()
     payload = {
-        "model": CONFIG["model"],
+        "model": cfg["model"],
         "messages": [
             {"role": "system",
              "content": SYSTEM_PROMPT + (f"\n\n{extra}" if extra else "")},
             {"role": "user", "content": f"[{kind}] {content}"},
         ],
-        "max_completion_tokens": CONFIG["max_tokens"],
+        "max_completion_tokens": cfg["max_tokens"],
         "thinking": {"type": "disabled"},
     }
-    r = await client.post(f"{CONFIG['base_url'].rstrip('/')}/chat/completions",
+    r = await client.post(f"{cfg['base_url'].rstrip('/')}/chat/completions",
                           json=payload,
-                          headers={"Authorization": f"Bearer {CONFIG['api_key']}"},
+                          headers={"Authorization": f"Bearer {cfg['api_key']}"},
                           timeout=30)
     r.raise_for_status()
     text = r.json()["choices"][0]["message"]["content"].strip()
@@ -307,7 +313,7 @@ def dedup_check(st, kind, content) -> str | None:
     """
     src = re.sub(r"\s+", "", content)[:40]
     now = time.time()
-    win = CONFIG["dedup_window_sec"]
+    win = _ai()["dedup_window_sec"]
     for k in list(st["recent"]):
         v = st["recent"][k]
         # 内层 entry 也要校：ts 缺失/非数值在这里就是 KeyError/TypeError，
@@ -738,7 +744,7 @@ async def supervise(client, st, topic, max_fails: int = 12):
 
 
 async def main():
-    log(f"triager up: model={CONFIG['model']}, out={TOPIC_OUT}")
+    log(f"triager up: model={_ai()['model']}, out={TOPIC_OUT}")
     _clean_tmp()                     # P2-3：先扫掉上次硬崩溃留下的孤儿 .tmp
     st = load_state()
     # read 不能是 None：那样 SSE 流**没有任何读超时**，网络路径静默失效

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,12 @@ if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+
+# 子进程都是本项目自己的 Python 脚本：Windows 上 stdout 重定向到管道时按
+# locale(cp936) 写中文，而 run() 一律按 utf-8 解码 —— 向导里「启动服务栈 / 窗口
+# 归位」的输出全是乱码。PYTHONIOENCODING 只改子进程 stdio 编码，不动其它行为。
+CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 def _detect_root() -> Path:
@@ -91,7 +98,12 @@ def _autostart_valid_count() -> int:
             i += 1
             if name in AUTOSTART.values():
                 parts = value.strip('"').split('" "')
-                if all(Path(p.replace("\\\\", "\\")).exists() for p in parts[:2]):
+                # len(parts) >= 2：GUI 的 _autostart_state 一直是这个判据，这里
+                # 漏了 —— 一条只剩 exe、没有脚本参数的坏 Run 值会被算成「有效」，
+                # 于是 --check / step_autostart 报 6/6 而登录时一个服务都不启动。
+                # 两处口径必须一致（R1 把重复代码收敛到本函数时漏掉了这条差异）。
+                if len(parts) >= 2 and all(
+                        Path(p.replace("\\\\", "\\")).exists() for p in parts[:2]):
                     good += 1
     return good
 
@@ -139,7 +151,7 @@ def run(cmd: list[str], *, timeout: int = 600, stdin_text: str | None = None,
         p = subprocess.run(
             [str(c) for c in cmd], cwd=str(cwd or ROOT), input=stdin_text,
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout,
+            errors="replace", timeout=timeout, env=CHILD_ENV,
         )
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
@@ -308,8 +320,21 @@ def step_config() -> bool:
         "vision": _default_vision(my_name),
         "apps": _default_apps(),
     }
-    CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
-                      encoding="utf-8")
+    # tmp + replace：fp.config.json 是六个服务的唯一配置源，write_text 写一半被
+    # Ctrl+C / 断电 / AV 打断就是半截 JSON —— 所有服务的 fpconfig.raw() 从此恒返回
+    # {}（AI 全 fail-open、隧道读不到 vps 块），而报错只指向「配置坏了」不指向这里。
+    # PC 侧 state/rules/GUI 的写点早就是 tmp+replace，这是最后一处裸直写。
+    tmp = CONFIG.with_name(CONFIG.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(CONFIG)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     # 回读校验（防写坏）
     back = json.loads(CONFIG.read_text(encoding="utf-8"))
     need = ("ai", "ntfy", "vps", "vision", "apps")

@@ -143,10 +143,11 @@ def wait_health(timeout: int = HEALTH_TIMEOUT) -> tuple[bool, str]:
 
 
 def tail(path: Path, n: int = 8) -> str:
-    try:
-        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:])
-    except Exception:
-        return "(读不到)"
+    # pclog.read_tail 只碰尾部 64KB：健康门失败时要打隧道日志的最后几行，
+    # 原实现 read_text() 全量读 —— RotatingFileHandler 是 2MB x3，最坏 6MB
+    # 整读只是为了 8 行（与 watchdog.check_link / GUI._tail 同一个毛病）。
+    lines = pclog.read_tail(path, n)
+    return "\n".join(lines) if lines else "(读不到)"
 
 
 def verify_procs() -> dict[str, int]:

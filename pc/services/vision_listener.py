@@ -49,7 +49,6 @@ import fpconfig
 # ""/{}，绝不把 pythonw 打死在 excepthook 挂上之前（原先这里的 try 就是
 # 为这个场景准备的，现在收敛到 fpconfig 一处）。
 NTFY_TOKEN = fpconfig.ntfy_token()
-AI = fpconfig.ai()
 
 
 def _auth() -> dict:
@@ -141,8 +140,10 @@ OFFSCREEN_X_OFFSET = int(SETTINGS.get("offscreen_offset", 120))
 # 忽略/黑名单不在此派生：handle() 运行时经 fpconfig.rules_for(label) 读
 # apps 块 —— 与闸门 ai_triager 消费同一份声明（单一配置，无第二份名单）。
 
-# OCR/视觉模型接口已在文件顶部取好（AI = fpconfig.ai()，fp.config.json 单一
-# 来源，与 ai_triager 共用），这里不再合并第二份。
+# OCR/视觉模型接口每次 analyze 现取（fpconfig.ai()，mtime 缓存）—— 与
+# ai_triager._ai() 同口径：导入期快照一份会在配置当时缺失/半写时把整个进程
+# 钉死在占位端点上永不自愈（analyze 每轮必失败 -> 采集停摆告警），且配置
+# 改完不重启不生效。fp.config.json 仍是单一来源，这里不合并第二份。
 
 # 睡眠间隔取「全局值与各目标 poll_min 的最小」——否则某目标配了更短间隔
 # 也不会真的更早醒来（醒来后由目标级到期判断决定扫谁）。
@@ -427,16 +428,17 @@ def _prompt_for(label: str, hint: str) -> str:
 
 
 def analyze(bgra, w, h, key: str, label: str, prompt: str) -> dict | None:
+    ai = fpconfig.ai()      # 见文件头注释：现取，不导入期快照
     png = bgra_to_png(bgra, w, h)
     b64 = base64.b64encode(png).decode()
     try:
         r = httpx.post(
-            AI["base_url"].rstrip("/") + "/chat/completions",
-            headers={"Authorization": f"Bearer {AI['api_key']}"},
+            ai["base_url"].rstrip("/") + "/chat/completions",
+            headers={"Authorization": f"Bearer {ai['api_key']}"},
             timeout=90,
             trust_env=False,  # never route our traffic through the system proxy
             json={
-                "model": AI["model"],
+                "model": ai["model"],
                 "messages": [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": [
@@ -444,14 +446,23 @@ def analyze(bgra, w, h, key: str, label: str, prompt: str) -> dict | None:
                         {"type": "text", "text": f"分诊这张{label}截图"},
                     ]},
                 ],
-                "max_completion_tokens": AI.get("max_completion_tokens", 600),
+                "max_completion_tokens": ai.get("max_completion_tokens", 600),
                 "thinking": {"type": "disabled"},
             })
         r.raise_for_status()
         text = r.json()["choices"][0]["message"]["content"].strip()
         if text.startswith("```"):
             text = text.strip("`").removeprefix("json").strip()
-        return json.loads(text)
+        data = json.loads(text)
+        # 合法 JSON 但不是对象（["重要"] / "重要" / null）也是「识别失败」的一种：
+        # 原样返回会让 scan_app 里的 result["_app"] = key 抛 TypeError，被外层
+        # 算成 cycle error（状态归到异常而不是 analyze），故障文案里的
+        # 「state=」也就永远是 TypeError 而不是 analyze。在这里挡掉，统一走
+        # 返回 None -> scan_app 判 analyze 失败那条路。
+        if not isinstance(data, dict):
+            raise TypeError(f"model returned {type(data).__name__}: "
+                            f"{str(data)[:60]}")
+        return data
     except Exception as e:
         log(f"analyze error [{key}]: {e!r}")
         return None
@@ -596,7 +607,8 @@ def handle(result: dict):
 
 def main():
     log(f"vision listener: poll={POLL_MIN}min(sleep {POLL_SLEEP_MIN}min), "
-        f"active {ACTIVE_FROM}:00-{ACTIVE_TO}:00, ai={AI.get('model', '未配置')}, "
+        f"active {ACTIVE_FROM}:00-{ACTIVE_TO}:00, "
+        f"ai={fpconfig.ai().get('model', '未配置')}, "
         f"targets={list(TARGETS) or '无 —— 检查 fp.config.json 的 vision 块'}")
     for key, spec in TARGETS.items():
         info = find_target(spec)

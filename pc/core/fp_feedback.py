@@ -53,10 +53,8 @@ TOPIC = "fp-feedback"
 FEEDBACK_FILE = HERE / "feedback.jsonl"
 RULES_FILE = HERE / "triage_rules.json"
 
-# 模块级缓存：地址和 token 都是启动期就定死的，每条重要推送重读一次文件
-# 属于白白多出来的 IO（同 rules 的 mtime 缓存一个道理）。定义必须在
-# public_base/_token 之前 —— 否则 Pyright 报 unbound。
-_base_cache: str | None = None
+# token 的模块级缓存：token 不在 GUI 的「下次重连生效」范围内（改 token 要
+# 重启服务），所以缓存它与 fpconfig 的契约一致。地址不缓存，见 public_base。
 _token_cache: str | None = None
 
 # 连续几次「不该推」就闭嘴。3 次是折中：一次手滑不该改规则，
@@ -83,14 +81,14 @@ def public_base() -> str:
     env = os.environ.get("FP_NTFY_PUBLIC", "").strip()
     if env:
         return env.rstrip("/")
-    global _base_cache          # 不写这行，下面的赋值会让它变成本函数的局部变量，
-    if _base_cache:             # 于是这句读到未赋值的局部 → UnboundLocalError
-        return _base_cache
+    # 不做跨调用缓存：vps.host 由 GUI 改过之后按钮地址必须跟着变。原实现的
+    # _base_cache 一填上就**永不失效**（fpconfig 的 mtime 热重载管不到它），
+    # 而 GUI 对 vps 块的提示恰恰是「隧道下次重连生效」= 不要求重启本服务 ——
+    # 缓存和提示互相矛盾，改完 IP 后新推送的 👍/👎 按钮一直打旧地址。
+    # 每次只多一次 fpconfig 内部的 stat（mtime 缓存），反馈是低频事件。
     try:
         host = fpconfig.vps()[0]
-        # 成功才缓存：失败要保留每次重试的机会（以及每次那行告警日志）
-        _base_cache = f"http://{host}:2586"
-        return _base_cache
+        return f"http://{host}:2586"
     except Exception as e:
         # 推不出地址时按钮点了必然 404，宁可不放按钮也不能放个坏按钮
         log(f"public_base unavailable ({e!r}), actions disabled")

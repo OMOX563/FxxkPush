@@ -19,7 +19,6 @@ from pathlib import Path
 
 import paramiko
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
 LOCAL_HOST, LOCAL_PORT = "127.0.0.1", 2586
 REMOTE_HOST, REMOTE_PORT = "127.0.0.1", 2586
 

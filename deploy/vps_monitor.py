@@ -43,6 +43,8 @@ UNITS_TO_WATCH = ["maddy", "ntfy", "caddy"]
 
 # ---------- state / dedup ----------
 _state = {"cooldowns": {}, "counts": {}}
+# allowed() 放行那一刻的旧值，供 push_hard 失败时回滚（见 undo_allowed）
+_undo: dict = {}
 
 def load_state():
     if STATE_FILE.exists():
@@ -83,11 +85,45 @@ def allowed(kind, cooldown=COOLDOWN_DEFAULT):
     # 未来，now-last 为负 -> 恒小于 cooldown -> 冷却追平之前该类告警一条都
     # 发不出去（ssh-login 冷却 24h，等于静音一整天）。负差按「已过期」处理。
     if now < last or now - last >= cooldown:
+        # 记旧值：冷却必须只在**真送达**后才消耗（见 undo_allowed）
+        _undo[kind] = (last, _state["counts"].get(kind, 0))
         _state["cooldowns"][kind] = now
         _state["counts"][kind] = 0
         return True
     _state["counts"][kind] = _state["counts"].get(kind, 0) + 1
     return False
+
+
+def undo_allowed(kind):
+    """push_hard 失败时回滚这次冷却窗口。
+
+    原实现是「先 allowed() 吃掉冷却、再 push()」，而 push 的失败有两种形态：
+    非 200（返回 False）和 curl --max-time 20 超时（TimeoutExpired **异常**，
+    被 main 的 except 接成 monitor-error）。两种情况下冷却都已经消耗掉，该类
+    告警在 30 分钟（disk/unit）甚至 24 小时（ssh-login）内**不会再尝试** —— 而
+    失败最常见的原因恰恰是 ntfy/网络抖动，等冷却过去早就恢复了。等于「最需要
+    送达的那一次失败，顺手把之后 24 小时也静音了」，正是这条链路最怕的形态。
+    回滚后下一轮（60s）重试，成功才重新起冷却；重复失败也不会变成风暴 ——
+    每轮每类最多一次 curl 尝试。"""
+    prev = _undo.pop(kind, None)
+    if prev is None:
+        return
+    _state["cooldowns"][kind] = prev[0]
+    _state["counts"][kind] = prev[1]
+
+
+def push_hard(kind, title, message, priority=4, tags=None):
+    """带冷却回滚的硬规则推送 —— allowed() 放行后必须走这里，不能直接 push()。"""
+    try:
+        ok = push(title, message, priority=priority, tags=tags)
+    except Exception as e:
+        # 超时异常也回滚：原来它冒到 main 的 except（冷却同样已被吃掉），这里
+        # 先落一条灰区（gray 自身不再抛，r7-11）再统一按失败处理。
+        gray("push-error", {"kind": kind, "error": repr(e)})
+        ok = False
+    if not ok:
+        undo_allowed(kind)
+    return ok
 
 # ---------- ntfy ----------
 def _publish(topic, title, message, priority=4, tags=None):
@@ -184,7 +220,8 @@ def check_oom(since_ts):
         if allowed("oom"):
             n = _state["counts"].get("oom", 0)
             extra = f" (+{n} suppressed)" if n else ""
-            push("VPS 内存不足 OOM", f"被杀进程: {procs}{extra}", priority=4)
+            push_hard("oom", "VPS 内存不足 OOM", f"被杀进程: {procs}{extra}",
+                      priority=4)
     for pid, name in kills:
         gray("oom-kill", {"pid": pid, "process": name})
 
@@ -198,7 +235,8 @@ def check_disk():
         if allowed("disk", cooldown=3600):
             n = _state["counts"].get("disk", 0)
             extra = f" (+{n} suppressed)" if n else ""
-            push("VPS 磁盘告急", f"根分区 {pct}% 已用{extra}", priority=4)
+            push_hard("disk", "VPS 磁盘告急", f"根分区 {pct}% 已用{extra}",
+                      priority=4)
     else:
         # gray-log only when the number changes (avoid per-minute spam)
         if _state.get("last_disk_pct") != pct:
@@ -226,8 +264,9 @@ def check_ssh_login(since_ts):
         if user == "root" and allowed(f"ssh-login:{ip}", cooldown=86400):
             n = _state["counts"].get(f"ssh-login:{ip}", 0)
             extra = f" (+{n})" if n else ""
-            push("VPS SSH 登录", f"root 从 {ip} 登录成功{extra}",
-                 priority=3, tags=["door"])
+            push_hard(f"ssh-login:{ip}", "VPS SSH 登录",
+                      f"root 从 {ip} 登录成功{extra}",
+                      priority=3, tags=["door"])
 
 def check_units():
     p = subprocess.run(
@@ -246,11 +285,11 @@ def check_units():
                 n = _state["counts"].get(f"unit-failed:{unit}", 0)
                 extra = f" (+{n})" if n else ""
                 dur_min = int((time.time() - seen.get(unit, time.time())) // 60)
-                push("VPS 服务挂了",
-                     f"{unit} 进入 failed 状态，已持续约 {dur_min} 分钟{extra}\n"
-                     f"排查: systemctl status {unit}; "
-                     f"journalctl -u {unit} -n 50 --no-pager",
-                     priority=4, tags=["boom"])
+                push_hard(f"unit-failed:{unit}", "VPS 服务挂了",
+                          f"{unit} 进入 failed 状态，已持续约 {dur_min} 分钟{extra}\n"
+                          f"排查: systemctl status {unit}; "
+                          f"journalctl -u {unit} -n 50 --no-pager",
+                          priority=4, tags=["boom"])
         else:
             gray("unit-failed", {"unit": unit})
     # P2-1：已恢复的 unit 清出计时，下次再挂从零开始

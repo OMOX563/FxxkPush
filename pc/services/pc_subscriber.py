@@ -48,15 +48,8 @@ def _auth() -> dict:
     return {"Authorization": f"Bearer {NTFY_TOKEN}"} if NTFY_TOKEN else {}
 
 # ---------- toast ----------
-_toaster = None
-
-def get_toaster():
-    global _toaster
-    if _toaster is None:
-        from winotify import Notification
-        _toaster = Notification
-    return _toaster
-
+# （R2：原来的 _toaster/get_toaster 惰性工厂全仓库零调用点 —— toast() 里
+#  每次都直接 from winotify import，这个「缓存 import 结果」的半成品是死代码。）
 ECHO = Path(__file__).resolve().parents[1] / "toast_echo.jsonl"
 
 
