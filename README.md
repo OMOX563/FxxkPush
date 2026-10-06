@@ -84,66 +84,55 @@ pc/
 4. AI 调用失败时默认按重要推送（宁滥勿缺）
 5. 附带 30 分钟滑动窗口去重（同类事件只报一次+计数）
 
-## 最快上手（三步）
+## 上手教程（GUI 主线）
 
-> 新用户从这里开始；下面的「快速上手」是等价的手动分步版。
+> 新手照这一节走完就能收到手机推送：**下载 → VPS 一条命令 → PC 双击 `GUI.bat`
+> → 表单填四项 → 一键启动 → 手机订阅**。首次还要在 PC 上双击一次 `setup.bat`
+> （装依赖 + 通知授权，第 3 步，一次性）；装完日常只用 GUI，命令行与向导全部
+> 降级到文末「附录：无 GUI 环境与排障」。
 
-1. **VPS**：把仓库传到服务器后执行一条命令 —— `bash deploy/setup_vps.sh`
-   （装 ntfy、写服务端配置、建账号签 token、部署监控 systemd；结束时打印
-   **手机订阅所需的全部信息**和要粘贴的 token。可重复执行；公网 IP 可用
-   `FP_PUBLIC_IP=x.x.x.x` 覆盖自动探测）。
-2. **PC**：克隆/解压仓库 → 双击 `setup.bat` —— 向导按序自动完成：建 venv 装
-   依赖（uv/python 双通道）→ 问答生成 `fp.config.json`（已有配置默认保留，
-   不静默覆盖）→ Windows 通知授权 → 注册 6 项开机自启 → 立即启动（含隧道
-   健康门）→ 窗口挪到屏外 → 健康验证。随时可用 `setup.py --check` 做只读
-   自检。
-3. **手机**：装 ntfy App，按第 1 步打印的信息订阅 `http://VPS-IP:2586` 的
-   `fp-phone`（账号密码同第 1 步输出，开高优先级 + 震动）。
+### 第 0 步：前提
 
-## 图形化界面（v0.8）
+- 一台有公网 IP 的 Linux VPS（1C1G 够用；VPS 端没有图形界面，命令行省不掉）
+- 一台 Windows 10/11 PC：PATH 里有 Python 3.12+ 或 [uv](https://uv.sh)
+  （`GUI.bat` 按 `python` → `uv` → `python3` 的顺序找解释器）；Win11 自带
+  WebView2 Runtime，Win10 缺了就装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+- 手机能装 ntfy 客户端
 
-双击 **`GUI.bat`** 启动。依赖随 `setup.bat` 安装：`pywebview` +
-`pythonnet`，EdgeChromium 内核，Win10/11 需 WebView2 Runtime（Win11 自带）。
-控制台随 GUI 一起工作：**关闭 GUI 后控制台自动关闭**（仅启动失败时
-暂停保留以便看报错）；带参数 `--smoke` 即自检模式。无需先手动启动任何
-命令行工具 —— 面板里的「一键启动」即等价 `restart_services`（含隧道健康门）：
+### 第 1 步：下载
 
-- **仪表盘**：6 服务状态、隧道 health、自启 6 项、看门狗心跳、启动日志；
-  一键启动 / 停止（走 start_services 健康门）
-- **配置**：表单直写 `fp.config.json` —— **合并写入**（不动 apps/vision
-  既有条目），密钥字段留空 = 保持原值；保存后提示是否需重启生效
-- **控制**：开机自启开关、聊天窗口归位（park/unpark）、一键卸载
-  （输入确认防误触，可选清除数据）、打开日志、跑 `setup.py --check`
-- 自检：`fxxkpush_gui.py --smoke`（无窗口六项断言 + 真开窗 UI 探针）
+克隆仓库或下载 zip 解压，拿到仓库根（`GUI.bat`、`setup.bat`、`deploy/`、`pc/`、
+`gui/` 都在这层）。`fp.config.json` 和 `.venv` 不入库：前者首次由向导生成，
+后者 `setup.bat` 现建。
 
-## 快速上手
+### 第 2 步：VPS —— 一条命令
 
-前提：一台有公网 IP 的 Linux VPS + 一台 Windows PC（Win10/11）+ 手机装 ntfy 客户端。
-
-### 1. VPS：装 ntfy + 部署监控
+把仓库传到服务器（root 权限，可重复执行）：
 
 ```bash
-# 安装 ntfy（apt 源或 GitHub release 二进制均可）
-apt install ntfy
-
-# 应用服务端配置（记得改 base-url 成你自己的地址）
-cp deploy/ntfy-server.yml /etc/ntfy/server.yml
-
-# 创建管理员用户并签发 token（默认拒绝匿名访问）
-NTFY_PASSWORD=你的密码 ntfy user add --role admin 你的管理员用户名
-ntfy token add 你的管理员用户名   # 输出 tk_xxx，PC 侧要用
-
-# 启动并设置开机自启
-systemctl enable --now ntfy
-curl http://127.0.0.1:2586/v1/health   # 返回 200 即成功
-
-# 部署日志监控
-mkdir -p /opt/fuckpush
-cp deploy/vps_monitor.py /opt/fuckpush/
-# 创建 systemd unit（参考内容如下）
+bash deploy/setup_vps.sh
 ```
 
-`/etc/systemd/system/fuckpush-monitor.service`：
+脚本按序做 5 件事：装 ntfy → 探测公网 IP → 写 `/etc/ntfy/server.yml` 并启动 →
+建管理员账号签 token → 部署日志监控 systemd。结束时打印**手机订阅所需的全部
+信息**（服务器地址、话题、账号密码）和要粘到 PC 的 `tk_` 开头的 token。
+可选环境变量：`FP_PUBLIC_IP=1.2.3.4` 覆盖自动探测、`FP_NTFY_USER` /
+`FP_NTFY_PASSWORD` 指定管理员账号（不给就随机生成并打印）。
+
+不用脚本的话，同样的事就是下面这几条（脚本替你逐条跑过）：
+
+```bash
+apt install ntfy                                # 或用 GitHub release 二进制
+cp deploy/ntfy-server.yml /etc/ntfy/server.yml  # 记得改 base-url 成你的地址
+NTFY_PASSWORD=你的密码 ntfy user add --role admin 你的管理员用户名
+ntfy token add 你的管理员用户名                 # 输出 tk_你的token，PC 侧要用
+systemctl enable --now ntfy
+curl http://127.0.0.1:2586/v1/health            # 返回 200 即成功
+mkdir -p /opt/fuckpush && cp deploy/vps_monitor.py /opt/fuckpush/
+```
+
+日志监控的 systemd unit（`deploy/setup_vps.sh` 会替你写好，手动部署照抄，
+放到 `/etc/systemd/system/fuckpush-monitor.service`）：
 
 ```ini
 [Unit]
@@ -169,69 +158,160 @@ systemctl daemon-reload && systemctl enable --now fuckpush-monitor
 systemctl is-active ntfy fuckpush-monitor   # 两个都应是 active
 ```
 
-### 2. 手机：安装 ntfy 客户端
+### 第 3 步：PC 首次 —— 双击 `setup.bat`（一次性）
 
-1. 安装 ntfy（Play Store / F-Droid / App Store）
-2. 添加订阅：服务器填 `http://你的VPS-IP:2586`，话题填 `fp-phone`
-3. 在订阅设置里填账号密码（步骤 1 创建的用户）并开启高优先级 + 震动
+向导按序走 7 步，其中**只有它能做的两件**是：建 `.venv` 装依赖（GUI 要的
+`pywebview` / `pythonnet` 就装在这里）和 Windows 通知读取授权（会弹系统窗口，
+点「允许」，这是 toast 通道的前提）。顺带问答生成 `fp.config.json`，首次会一并
+立好 `vision` 窗口清单与 `apps` 分诊规则的默认值（**这两块 GUI 表单不碰**），
+再注册 6 项开机自启、立即启动（含隧道健康门）、窗口挪到屏外、健康验证。
+已有配置默认保留，绝不静默覆盖。
 
-### 3. PC：装依赖 + 配置
+装完之后日常**不再需要** `setup.bat`：改配置、启停、自启、窗口归位、卸载
+全在 GUI 里做。
+
+### 第 4 步：双击 `GUI.bat` 打开控制台
+
+- 界面三个页签：**仪表盘 / 配置 / 控制**（逐卡说明见下一节「图形化界面（v0.8）」）
+- 控制台跟着 GUI：窗口正常关闭 → 控制台自动关闭；只有启动失败才 `pause` 保留，
+  好让你读报错
+- 重复双击会聚焦已开的窗口（单实例），窗口标题 `FxxkPush v0.8.0`（版本号读
+  README 首行 H1）
+- 打不开、提示没找到 Python 或缺 pywebview → 见附录「排障」
+
+### 第 5 步：配置页填四项
+
+「配置」页表单分四组，「保存配置」= **合并写入** `fp.config.json`（不动 `apps` /
+`vision` 既有条目；密钥字段**留空 = 保持原值**）：
+
+| 表单分组 | 字段 | 写入 | 校验与语义 |
+|---|---|---|---|
+| VPS SSH | 公网地址\*、端口、用户、密码 | `vps.*` | 地址必填；端口须是 1–65535 的数字（默认 22），用户默认 `root`；密码留空保持，点「显示」按需回读 |
+| ntfy 推送通道 | token（`tk_` 开头） | `ntfy.token` | 前缀不对直接拦下；留空保持 |
+| AI / OCR 模型（三处分诊共用） | 接口地址 base_url、api_key、模型名 | `ai.*` | base_url 须以 `http://` / `https://` 开头；api_key 留空保持；**地址或模型留空 = AI fail-open（判不了就全推）** |
+| 通用 | 你的昵称（「@我」判定）+ 视觉目标（只读 chips） | `vision.settings.my_name` | 视觉目标来自 `fp.config.json` 的 `vision` 块，表单只显示不编辑 |
+
+保存后 banner 列出改了哪些键；`ai` / `ntfy` / `vision` 有改动时会多一个
+「一键启动（重启生效）」按钮（服务启动时才取快照，`apps` 段则是 mtime 热加载、
+即时生效，见「配置文件」一节）。校验不过就整份不写，错误逐条列在 banner 里；
+配置文件当前读不出来时同样拒绝保存，避免把已有配置整份覆盖掉。
+
+> `apps` 规则与 `vision` 窗口清单**不在表单里**：首次由 `setup.bat` 向导生成
+> 默认值，之后直接改 `fp.config.json`。另外保存是整份 `json.dumps` 重写，
+> 手写的 `//` 注释会被吃掉，保存前会如实警告。
+
+### 第 6 步：一键启动
+
+仪表盘「▶ 一键启动」等价 `pc\bootstrap\start_services.py`，走完整健康门：
+
+1. 杀旧进程 → 起隧道 → 轮询 `/v1/health` 直到 200 → 才起其余 5 个 → 校验 6×2 进程
+2. 启动过程输出落 `pc/logs/gui_launcher.log`，「启动日志」卡显示
+   `start_services.log` 的尾部；`.venv` 不存在会直接报「.venv 不存在，请先跑
+   setup.bat」
+
+起来之后对着「链路自检」卡核三样：**隧道 health = HTTP 200**、**开机自启 x/6**、
+**视觉目标**不是「（无）」；「看门狗心跳」有一行在更新 = 管道自检在跑。顶栏三枚
+药丸（服务 / 隧道 / 自启）同时变绿就算成了。进程数是服务数的 2 倍（venv 的
+`pythonw.exe` 是跳板，派生真正的解释器），正常。要停点「■ 停止」。
+
+启动顺序那道门不能省：隧道慢一点（SSH 抖动、代理切换、开机网络未就绪），后面
+五个服务就会对着一个还没就绪的 `2586` 空转刷错，而且没有任何报错提示这是
+「启动顺序」问题。
+
+### 第 7 步：手机装 ntfy 订阅
+
+1. 装 ntfy（Play Store / F-Droid / App Store）
+2. 按第 2 步脚本打印的信息添加订阅：服务器 `http://你的VPS-IP:2586`，话题 `fp-phone`
+3. 订阅设置里填账号密码（第 2 步创建的用户），开**高优先级 + 震动**
+
+### 装完验证一遍
+
+- 仪表盘「链路自检」→ 隧道 `HTTP 200`；点「跑 setup --check」看五项汇总
+  （项目标记 / venv 与依赖 / fp.config.json 五块 / 开机自启 x/6 / 服务健康）
+- 端到端：任意渠道发含 `text` 的消息 → 手机收到（测试通道，绕过 AI 与去重）
+- 微信 / 企业微信：让人发条消息 → 30 分钟内 AI 分诊，重要则手机响
+- VPS：停一个被监控的服务 → 手机收到告警
+- 日志：点「打开日志目录」→ `pc\logs\*.log` 全部走 `pc/core/pclog.py`（统一格式 +
+  统一出口），`trace_id` 贯穿一条消息的全链路，grep 一次就能拉出完整过程：
+
+```
+2026-09-22T13:20:01.781+0800 [INFO ] ai_triager | trace=verify1 | TEST_PUSH ok ...
+grep "trace=verify1" pc/logs/*.log
+```
+
+## 图形化界面（v0.8）
+
+依赖由 `setup.bat` 装进 `.venv`（`pywebview` + `pythonnet`，EdgeChromium 内核），
+Win10/11 要有 WebView2 Runtime（Win11 自带）。入口 `GUI.bat`（带控制台，可看输出、
+可跑自检），**无需先手动启动任何命令行工具**。逐页：
+
+### 顶栏
+
+版本徽标（读 README 首行 H1）+ 三枚状态药丸，2.5 秒刷新一次：
+`服务 N 进程` / `服务未运行`、`隧道 200` / `隧道不通`、`自启 x/6` / `自启未注册`。
+
+### 仪表盘
+
+- **服务进程**：6 个服务标签（跑着显示 `×N`、没跑显示 `✕`），副题
+  `N 进程 · x/6 服务`；按钮「▶ 一键启动」「■ 停止」（两者互斥，执行中转圈禁用）
+- **链路自检**：隧道 health、开机自启（`x/6 项路径有效` / `未注册`）、视觉目标
+  三个只读字段；按钮「跑 setup --check」（结果进启动日志区 + toast 提示通过与否）、
+  「打开日志目录」（资源管理器打开 `pc\logs`）
+- **看门狗心跳 + 启动日志**：`watchdog.log` 最后一行、`start_services.log` 尾部
+  10 行；启动 / 自检这类长任务的进度也显示在这里
+
+### 配置
+
+`fp.config.json` 四组表单字段（第 5 步的表）+「保存配置」「重置表单」。密钥字段
+默认打码、不回传前端，点「显示」才按需回读（「留空 = 保持原值」的语义不变）。
+保存结果三种 banner：**未保存**（校验错误逐条列出）/ **已保存**（列出改动键，
+需要重启时附「一键启动（重启生效）」按钮）/ **内容无变化，未写入**；
+`vision` 目标以只读 chips 显示。
+
+### 控制
+
+- **开机自启**：开关写 / 删 HKCU Run 的 6 项（`FuckPush_*`，无需管理员），标签显示
+  「已开启（6 项，下次登录生效）」或「已关闭」
+- **聊天窗口归位**：「藏到屏外（park）」「拉回屏内（unpark）」——视觉通道需要窗口
+  在屏幕外，重启电脑后手动归位就用这两个按钮
+- **危险区**：「一键卸载…」弹窗，可勾选「同时清除 fp.config.json 与运行数据
+  （含密钥，不可恢复）」，在输入框敲 `uninstall` 才解锁「确认卸载」；执行顺序 =
+  停服务 → 摘 6 项自启 → 窗口拉回屏内（等价 `uninstall.py --yes [--purge]`）
+
+### 自检与后台行为
+
+- `GUI.bat --smoke`（即 `fxxkpush_gui.py --smoke`）：先无窗口断言（状态结构与实值、
+  配置往返无变化、空 host / 坏 token 拦截、自启注册幂等、密钥回读与非法参数拦截），
+  全过再真开窗跑一次 UI 探针，约 6 秒自动关闭。注意其中「自启注册幂等」会把 6 项
+  自启按当前路径**重写一遍**（幂等），不是纯只读
+- 「一键启动」「停止」「一键卸载」三个会动服务进程的任务彼此互斥，不会并发交错
+- 重复双击 `GUI.bat` 聚焦旧窗口；关窗口即退出，控制台随之自动关闭
+
+## 附录：无 GUI 环境与排障
+
+命令行与向导全在这里：没有图形界面的环境（服务器、精简 shell、远程会话）、GUI
+起不来时的排障，靠它们。日常用不上，出事才翻。
+
+### A. 安装向导：setup.bat / setup.py
+
+双击 `setup.bat`（或 `python setup.py`）走 7 步交互向导：① 建 `.venv` 装依赖
+（uv / `python -m venv` 双通道）② 问答生成 `fp.config.json`（已有配置默认保留，
+不静默覆盖）③ Windows 通知读取授权 ④ 注册 6 项开机自启（HKCU Run）⑤ 立即启动
+（含隧道健康门）⑥ 窗口挪到屏外 ⑦ 健康验证 + 汇总。首次安装（教程第 3 步）就是它；
+GUI 替代不了的只有 ② 的默认 `vision` / `apps` 清单和 ③ 的通知授权。
+
+### B. 只读自检：setup.py --check
 
 ```powershell
-# Python 3.12（pywinrt 3.2.1 不支持 3.14）
-uv venv .venv --python 3.12
-uv pip install --python .venv httpx winotify paramiko psutil pillow `
-  pywebview pythonnet winrt-runtime `
-  winrt-Windows.UI.Notifications.Management winrt-Windows.UI.Notifications `
-  winrt-Windows.Foundation winrt-Windows.ApplicationModel winrt-Windows.Foundation.Collections
-
-# 首次授权：允许读取 Windows 通知（弹窗里点允许）
-.venv\Scripts\python.exe pc\services\notification_listener.py --grant-access
+.venv\Scripts\python.exe setup.py --check      # GUI 里点「跑 setup --check」跑的是同一套检查
 ```
 
-配置一个文件（都不入库）——仓库根的 `fp.config.json`，PC 侧全部配置只此
-一份（支持 `//` 注释，读取器 `pc/core/fpconfig.py`）：
+只检查环境 / 配置 / 自启 / 健康，不改动任何东西，5 项：项目标记文件、venv 与依赖、
+`fp.config.json`（`ai` · `ntfy` · `vps` · `vision` · `apps` 五块）、开机自启 x/6
+（路径可达）、服务健康 `health=200`。带 `//` 注释的配置不会被误判成坏文件
+（读取前先剥注释）。
 
-```
-{
-  "ai":     { "provider": "", "base_url": "云端/本地OCR模型端点",
-              "api_key": "sk-你的key", "model": "云端/本地OCR模型",
-              "max_tokens": 200, "max_completion_tokens": 600,
-              "dedup_window_sec": 1800, "daily_report_time": "22:00" },
-  "ntfy":   { "token": "tk_xxx" },
-  "vps":    { "host": "你的VPS-IP", "port": 22, "user": "root",
-              "password": "…" },
-  "vision": {
-    "settings": { "poll_min": 30, "my_name": "你的昵称",
-                  "active_from": 8, "active_to": 24,
-                  "dedup_ttl_sec": 21600, "offscreen_offset": 120 },
-    "wechat": { "process": "Weixin.exe", "class": "Qt51514",
-                "title": null, "min_w": 400, "label": "微信",
-                "prompt_hint": "左侧为会话列表，红色气泡为未读" }
-  },
-  "apps": {
-    "_default": { "ignore": false, "prompt_hint": "", "must_push": [],
-                  "blacklist": ["微信支付", "公众号", "服务通知"] },
-    "QQ": { "must_push": ["取件码"] }
-  }
-}
-```
-
-五段信息各归其位：① `ai` = 三处分诊共用的 OCR 端点与分诊参数 ②
-`ntfy.token` = ntfy token ③ `vps` = SSH 四段凭据 ④ `vision` = 窗口清单 +
-视觉运行参数 ⑤ `apps` = 按来源声明分诊规则（`ignore` 静默 / `blacklist`
-黑名单 / `must_push` 必推词 / `prompt_hint` 提示词补充）—— 新软件接入
-只需在 `apps` 加一个条目，不必改代码。（历史版本中的四份旧配置文件已
-删除，内容全部并入本文件。）
-
-配置生效语义：`apps` 段改动**即时生效**（mtime 热加载，黑名单/必推词无需重启）；
-`vision` / `ai` / `ntfy` 段改动需运行 `restart_services.bat`（服务启动时取快照）。
-
-### 4. PC：启动与自启
-
-**启动顺序 + 健康检查**：隧道必须先起来并确认 `health=200`，其余服务才启动。
-没有这道门，隧道慢一点（SSH 抖动、代理切换、开机网络未就绪），后面五个服务
-就会对着一个还没就绪的 `2586` 空转刷错，而且没有任何报错提示这是"启动顺序"问题。
+### C. 命令行启停与开机自启
 
 ```powershell
 # 一键重启（含顺序与健康门）：双击 pc\bootstrap\restart_services.bat
@@ -244,12 +324,16 @@ uv pip install --python .venv httpx winotify paramiko psutil pillow `
 # （6 项，Windows 登录时并发启动；各服务自带重试，隧道就绪前会自动等待）
 ```
 
-> 每个服务在任务管理器里会显示成 **2 个进程**（venv 的 `pythonw.exe` 是个跳板，会派生真正的解释器），所以 6 个服务 = 12 个进程，这是正常的。
+那道健康门的意义同第 6 步；GUI 的「▶ 一键启动」跑的就是这个 `start_services.py`。
+
+> 每个服务在任务管理器里会显示成 **2 个进程**（venv 的 `pythonw.exe` 是个跳板，
+> 会派生真正的解释器），所以 6 个服务 = 12 个进程，这是正常的。
 
 > **venv 或项目目录变动后**（重建 `.venv`、把仓库挪到别的路径）：HKCU Run 的
 > 6 个自启项和 `start_services.PYW` 都**硬编码了 `.venv` 绝对路径**，路径一变
 > 6 项（含 watchdog）会一起静默失效且没有任何看护者会发现。改完务必重跑
-> `pc\bootstrap\install_autostart.bat`，再 `reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"`
+> `pc\bootstrap\install_autostart.bat`（或在 GUI 控制页把开机自启关一次再开一次，
+> 同样按当前路径重写这 6 项），再 `reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"`
 > 核对 6 条路径都指向新位置。
 
 手动单起（不推荐，会跳过健康门）：
@@ -264,20 +348,39 @@ Start-Sleep 5
 .venv\Scripts\pythonw.exe pc\services\watchdog.py               # 6) 管道自检（故障直接推手机）
 ```
 
-### 5. 验证
+### D. 命令行验证
 
 ```powershell
-# a) 隧道通不通
+# 隧道通不通
 curl.exe -H "Authorization: Bearer $((Get-Content fp.config.json -Raw -Encoding UTF8 | ConvertFrom-Json).ntfy.token)" http://127.0.0.1:2586/v1/health   # 期望 200（PS5.1 必须 -Encoding UTF8，否则无 BOM 的 UTF-8 被按 ANSI 解成乱码）
-
-# b) 端到端：任意渠道发含 text 的消息 → 手机收到（测试通道，绕过 AI 与去重）
-# c) 微信/企业微信：让人发条消息 → 30 分钟内 AI 分诊，重要则手机响
-# d) VPS：停一个被监控的服务 → 手机收到告警
-# e) 日志：pc\logs\*.log 全部走 pc/core/pclog.py，统一格式 + 统一出口
-#    2026-09-22T13:20:01.781+0800 [INFO ] ai_triager | trace=verify1 | TEST_PUSH ok ...
-#    trace_id 贯穿一条消息的全链路，grep 一次就能拉出完整过程：
-#    grep "trace=verify1" pc/logs/*.log
 ```
+
+端到端 / 视觉 / VPS / 日志四项验证见上文「装完验证一遍」（GUI 版），内容一致；
+通知授权的命令行入口是 `.venv\Scripts\python.exe pc\services\notification_listener.py --grant-access`。
+
+### E. 排障
+
+- **双击 `GUI.bat` 报「未找到可用的 Python3」**：PATH 里既没有可用的 Python 3
+  也没有 `uv` —— 装一个（Python 3.12+ 或 [uv](https://uv.sh)）再试。
+- **弹窗「缺少 pywebview（跑一次 setup.bat 安装依赖）」**：PATH 上那个 `python`
+  跟 `.venv` 不是同一个解释器（`setup.bat` 只往 `.venv` 里装依赖）。换入口即可：
+  `uv run --python 3.12 python fxxkpush_gui.py`（接着用仓库根已有的 `.venv`），
+  或 `.venv\Scripts\pythonw.exe fxxkpush_gui.py`；彻底的解法是让 PATH 上那个
+  `python` 也装上 `pywebview` + `pythonnet`。
+- **窗口起不来、提示 WebView2**：装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+  （Win11 自带），装完重开 `GUI.bat`。
+- **「一键启动」过不了健康门 / 仪表盘显示「隧道不通」**：点「跑 setup --check」，
+  再看 `pc\logs\ntfy_tunnel.log` —— 多半是 `fp.config.json` 的 `vps` 四段不对
+  （密码、端口），或者这个网络把 SSH 也封了（那就得换网络，隧道是绕端口封锁的，
+  不是绕 SSH 封锁的）。
+- **AI 每条都推**：`ai.base_url` 或 `ai.model` 为空即 fail-open（判不了就全推），
+  表单补全这两项保存，再「一键启动（重启生效）」。
+- **改了配置没生效**：`apps` 段 mtime 热加载、即时生效；`ai` / `ntfy` / `vision`
+  段要重启服务 —— GUI 保存后的「一键启动（重启生效）」按钮，或
+  `pc\bootstrap\restart_services.bat`。
+- **通知授权过期 / 抓不到 toast**：重跑
+  `.venv\Scripts\python.exe pc\services\notification_listener.py --grant-access`
+  （向导第 3 步做的也是这件事）。
 
 ## 组件
 
@@ -328,7 +431,13 @@ curl.exe -H "Authorization: Bearer $((Get-Content fp.config.json -Raw -Encoding 
 
 ## 卸载（PC 侧）
 
-双击 `uninstall.bat`（或 `python uninstall.py`），交互确认输入 `yes` 后依次：
+两条路，做的是同一件事：
+
+- **GUI（推荐）**：控制页「危险区」→「一键卸载…」，可勾选「同时清除
+  `fp.config.json` 与运行数据（含密钥，不可恢复）」，在弹窗输入 `uninstall`
+  解锁「确认卸载」按钮
+- **命令行**：双击 `uninstall.bat`（或 `python uninstall.py`），交互确认输入
+  `yes` 后依次：
 
 1. 停止全部 FxxkPush 服务进程（按命令行匹配 `fuckpush/pc`，不动其它 pythonw）
 2. 删除 HKCU Run 的 6 个 `FuckPush_*` 自启项（含 StartupApproved 残留）
@@ -344,6 +453,46 @@ VPS 侧不受影响，如需停用：`systemctl disable --now fuckpush-monitor n
 | 文件 | 内容 |
 |---|---|
 | `fp.config.json` | **PC 侧唯一配置**（读取器 `pc/core/fpconfig.py`）：`ai` = OCR 端点与分诊参数（三处分诊共用）、`ntfy.token` = ntfy token、`vps` = SSH 四段凭据、`vision` = 窗口清单（process→class→title 三层匹配）+ 视觉运行参数、`apps` = 按来源声明 ignore/blacklist/must_push/prompt_hint（自定义软件接入，闸门与视觉双通道消费）。支持 // 注释，填表助手 `vision_listener.py list` |
+
+配置一个文件（都不入库）——仓库根的 `fp.config.json`，PC 侧全部配置只此
+一份（支持 `//` 注释，读取器 `pc/core/fpconfig.py`）：
+
+```
+{
+  "ai":     { "provider": "", "base_url": "云端/本地OCR模型端点",
+              "api_key": "sk-你的key", "model": "云端/本地OCR模型",
+              "max_tokens": 200, "max_completion_tokens": 600,
+              "dedup_window_sec": 1800, "daily_report_time": "22:00" },
+  "ntfy":   { "token": "tk_xxx" },
+  "vps":    { "host": "你的VPS-IP", "port": 22, "user": "root",
+              "password": "…" },
+  "vision": {
+    "settings": { "poll_min": 30, "my_name": "你的昵称",
+                  "active_from": 8, "active_to": 24,
+                  "dedup_ttl_sec": 21600, "offscreen_offset": 120 },
+    "wechat": { "process": "Weixin.exe", "class": "Qt51514",
+                "title": null, "min_w": 400, "label": "微信",
+                "prompt_hint": "左侧为会话列表，红色气泡为未读" }
+  },
+  "apps": {
+    "_default": { "ignore": false, "prompt_hint": "", "must_push": [],
+                  "blacklist": ["微信支付", "公众号", "服务通知"] },
+    "QQ": { "must_push": ["取件码"] }
+  }
+}
+```
+
+五段信息各归其位：① `ai` = 三处分诊共用的 OCR 端点与分诊参数 ②
+`ntfy.token` = ntfy token ③ `vps` = SSH 四段凭据 ④ `vision` = 窗口清单 +
+视觉运行参数 ⑤ `apps` = 按来源声明分诊规则（`ignore` 静默 / `blacklist`
+黑名单 / `must_push` 必推词 / `prompt_hint` 提示词补充）—— 新软件接入
+只需在 `apps` 加一个条目，不必改代码。（历史版本中的四份旧配置文件已
+删除，内容全部并入本文件。）
+
+配置生效语义：`apps` 段改动**即时生效**（mtime 热加载，黑名单/必推词无需重启）；
+`vision` / `ai` / `ntfy` 段改动需**重启服务**才生效（服务启动时取快照）——
+GUI 保存后的「一键启动（重启生效）」按钮，或命令行
+`pc\bootstrap\restart_services.bat`（见附录）。
 
 > 历史版本中的 `vps.secret` / `pc/ntfy.secret` / `pc/triage_config.json` /
 > `pc/vision_targets.json` 已删除（内容全部并入 `fp.config.json`）。
