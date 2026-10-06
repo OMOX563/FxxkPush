@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FxxkPush</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="aurora" aria-hidden="true">
+  <i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i>
+</div>
+
+<div id="app">
+  <header class="top glass">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+        <circle cx="12" cy="16" r="2.6" fill="#3ddc97"/>
+        <path d="M7.4 12.4a6.4 6.4 0 0 1 9.2 0" fill="none" stroke="#3ddc97" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M4.6 9.2a10.4 10.4 0 0 1 14.8 0" fill="none" stroke="#3ddc97" stroke-width="1.6" stroke-linecap="round" opacity=".55"/>
+      </svg>
+      <div class="brand-txt">
+        <h1>FxxkPush</h1>
+        <p>AI 消息分诊推送 · 控制台</p>
+      </div>
+    </div>
+    <div class="chips">
+      <span class="chip mono" id="chipVer">v…</span>
+      <span class="pill" id="pillSvc"><i></i><span>服务 …</span></span>
+      <span class="pill" id="pillHealth"><i></i><span>隧道 …</span></span>
+      <span class="pill" id="pillAuto"><i></i><span>自启 …</span></span>
+    </div>
+  </header>
+
+  <nav class="tabs glass" role="tablist" aria-label="主导航">
+    <button class="tab active" data-pane="dash" aria-selected="true">仪表盘</button>
+    <button class="tab" data-pane="cfg" aria-selected="false">配置</button>
+    <button class="tab" data-pane="ctrl" aria-selected="false">控制</button>
+  </nav>
+
+  <main>
+    <!-- ============ 仪表盘 ============ -->
+    <section class="pane active" id="pane-dash">
+      <div class="grid">
+        <div class="glass card">
+          <h2>服务进程 <span class="sub" id="procCount">—</span></h2>
+          <div class="chips wrap" id="scripts"><span class="muted">读取中…</span></div>
+          <div class="actions">
+            <button class="btn primary" id="btnStart">▶ 一键启动</button>
+            <button class="btn ghost" id="btnStop">■ 停止</button>
+          </div>
+        </div>
+
+        <div class="glass card">
+          <h2>链路自检</h2>
+          <div class="kv">
+            <span>隧道 health</span><code id="healthTxt">—</code>
+          </div>
+          <div class="kv">
+            <span>开机自启</span><code id="autoTxt">—</code>
+          </div>
+          <div class="kv">
+            <span>视觉目标</span><code id="visionTxt">—</code>
+          </div>
+          <div class="actions">
+            <button class="btn ghost" id="btnCheck">跑 setup --check</button>
+            <button class="btn ghost" id="btnLogs">打开日志目录</button>
+          </div>
+        </div>
+
+        <div class="glass card wide">
+          <h2>看门狗心跳 <span class="job" id="jobCheck"></span></h2>
+          <code class="wdline" id="wdLine">—</code>
+          <h2 class="mt">启动日志 <span class="job" id="jobStart"></span></h2>
+          <pre class="log" id="startLog">（暂无）</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 配置 ============ -->
+    <section class="pane" id="pane-cfg">
+      <div class="glass card">
+        <h2>fp.config.json 配置</h2>
+        <p class="hint">保存为<strong>合并写入</strong>：不动 apps / vision 既有条目；
+          密钥字段<strong>留空 = 保持原值</strong>。</p>
+        <form id="cfgForm" autocomplete="off">
+          <fieldset>
+            <legend>VPS SSH</legend>
+            <div class="row">
+              <label>公网地址 *<input data-k="host" spellcheck="false" placeholder="1.2.3.4 或域名"></label>
+              <label>端口<input data-k="port" inputmode="numeric" placeholder="22"></label>
+              <label>用户<input data-k="user" spellcheck="false" placeholder="root"></label>
+            </div>
+            <label>密码（留空保持）<span class="pw"><input type="password" data-k="password" placeholder="••••••••"><button type="button" class="eye" data-eye>显示</button></span></label>
+          </fieldset>
+
+          <fieldset>
+            <legend>ntfy 推送通道</legend>
+            <label>token（tk_ 开头，留空保持）<span class="pw"><input type="password" data-k="token" placeholder="tk_xxx"><button type="button" class="eye" data-eye>显示</button></span></label>
+            <p class="hint" id="tokenHint"></p>
+          </fieldset>
+
+          <fieldset>
+            <legend>AI / OCR 模型（三处分诊共用）</legend>
+            <label>接口地址 base_url<input data-k="base_url" spellcheck="false" placeholder="https://…/v1"></label>
+            <div class="row">
+              <label>api_key（留空保持）<span class="pw"><input type="password" data-k="api_key" placeholder="sk-…"><button type="button" class="eye" data-eye>显示</button></span></label>
+              <label>模型名<input data-k="model" spellcheck="false" placeholder="模型标识"></label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>通用</legend>
+            <label>你的昵称（「@我」判定）<input data-k="my_name" placeholder="你的昵称"></label>
+            <div class="vision-row">
+              <span class="muted">视觉目标：</span><span class="chips wrap" id="visionChips"></span>
+            </div>
+          </fieldset>
+
+          <div class="actions">
+            <button class="btn primary" id="btnSave" type="submit">保存配置</button>
+            <button class="btn ghost" type="button" id="btnReset">重置表单</button>
+          </div>
+        </form>
+        <div class="banner" id="cfgBanner" hidden></div>
+      </div>
+    </section>
+
+    <!-- ============ 控制 ============ -->
+    <section class="pane" id="pane-ctrl">
+      <div class="grid">
+        <div class="glass card">
+          <h2>开机自启</h2>
+          <p class="hint">6 个服务随登录启动（HKCU Run，无需管理员）。</p>
+          <label class="switch">
+            <input type="checkbox" id="swAuto">
+            <span class="track"><span class="knob"></span></span>
+            <span class="sw-label" id="swAutoLabel">读取中…</span>
+          </label>
+        </div>
+
+        <div class="glass card">
+          <h2>聊天窗口归位</h2>
+          <p class="hint">视觉通道把微信/企微窗口藏到屏外；卸载或需要时拉回。</p>
+          <div class="actions">
+            <button class="btn ghost" id="btnPark">藏到屏外（park）</button>
+            <button class="btn ghost" id="btnUnpark">拉回屏内（unpark）</button>
+          </div>
+          <p class="job" id="jobMove"></p>
+        </div>
+
+        <div class="glass card danger">
+          <h2>危险区</h2>
+          <p class="hint">一键卸载：停服务 → 摘自启 → 窗口回屏内。
+            数据默认保留，可在弹窗里选择清除。</p>
+          <div class="actions">
+            <button class="btn danger" id="btnUninstall">一键卸载…</button>
+          </div>
+          <p class="job" id="jobUn"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">FxxkPush · 本地控制台 · 配置读写 fp.config.json</footer>
+</div>
+
+<!-- 卸载确认 -->
+<div class="modal" id="unModal" hidden>
+  <div class="glass dialog" role="dialog" aria-modal="true" aria-labelledby="unTitle">
+    <h2 id="unTitle">确认卸载 FxxkPush？</h2>
+    <p class="hint">将依次：停止全部服务进程 → 删除 6 个开机自启项 → 聊天窗口拉回屏内。</p>
+    <label class="check"><input type="checkbox" id="unPurge">
+      同时清除 fp.config.json 与运行数据（含密钥，<strong>不可恢复</strong>）</label>
+    <label class="check">输入 <code>uninstall</code> 确认：
+      <input id="unConfirm" spellcheck="false" placeholder="uninstall"></label>
+    <div class="actions end">
+      <button class="btn ghost" id="unCancel">取消</button>
+      <button class="btn danger" id="unOk" disabled>确认卸载</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

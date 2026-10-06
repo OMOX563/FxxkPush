@@ -41,7 +41,8 @@ def _detect_root() -> Path:
 
 
 ROOT = _detect_root()
-VENV_PY = ROOT / ".venv" / "Scripts" / "python.exe"
+# pythonw：unpark 子进程与自启语义都要无窗口（python.exe 会弹控制台）
+VENV_PY = ROOT / ".venv" / "Scripts" / "pythonw.exe"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 SA_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 AUTOSTART = {
@@ -96,9 +97,14 @@ def warn(msg: str) -> None:
 
 def run_ps(cmd: str, timeout: int = 60) -> tuple[int, str]:
     try:
-        p = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
-                           capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+        p = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+            # pythonw 父进程下不加此标志 = 每次调用弹一个控制台黑窗
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except Exception as e:                                  # noqa: BLE001
         return 1, repr(e)

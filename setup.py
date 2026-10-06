@@ -50,6 +50,7 @@ CONFIG = ROOT / "fp.config.json"
 
 DEPS = [
     "httpx", "winotify", "paramiko", "psutil", "pillow",
+    "pywebview", "pythonnet",                      # GUI（v0.8，EdgeChromium 后端）
     "winrt-runtime",
     "winrt-Windows.UI.Notifications.Management",
     "winrt-Windows.UI.Notifications",
@@ -138,7 +139,7 @@ def deps_missing() -> list[str]:
         return ["<venv>"]
     code = (
         "import importlib.util as u\n"
-        "mods=['httpx','winotify','paramiko','psutil','PIL','winrt.runtime']\n"
+        "mods=['httpx','winotify','paramiko','psutil','PIL','webview','winrt.runtime']\n"
         "miss=[]\n"
         "for m in mods:\n"
         "    try:\n"
@@ -179,7 +180,7 @@ def step_deps() -> bool:
         ok(".venv 已创建")
 
     if deps_missing():
-        say("  安装依赖（httpx/winotify/paramiko/psutil/pillow/winrt-*，可能需要几分钟）...")
+        say("  安装依赖（httpx/winotify/paramiko/psutil/pillow/pywebview/pythonnet/winrt-*，可能需要几分钟）...")
         if shutil.which("uv"):
             rc, out = run(["uv", "pip", "install", "--python", str(VPY)] + DEPS,
                           timeout=900)

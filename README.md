@@ -1,4 +1,4 @@
-# FxxkPush v0.7.0
+# FxxkPush v0.8.0
 
 自建 AI 消息分诊推送服务：PC 上的 AI 判断"哪些通知值得打扰手机"，重要的经 ntfy 推到手机/手表，垃圾静默归档。
 
@@ -100,6 +100,22 @@ pc/
 3. **手机**：装 ntfy App，按第 1 步打印的信息订阅 `http://VPS-IP:2586` 的
    `fp-phone`（账号密码同第 1 步输出，开高优先级 + 震动）。
 
+## 图形化界面（v0.8）
+
+双击 **`GUI.bat`** 启动。依赖随 `setup.bat` 安装：`pywebview` +
+`pythonnet`，EdgeChromium 内核，Win10/11 需 WebView2 Runtime（Win11 自带）。
+控制台随 GUI 一起工作：**关闭 GUI 后控制台自动关闭**（仅启动失败时
+暂停保留以便看报错）；带参数 `--smoke` 即自检模式。无需先手动启动任何
+命令行工具 —— 面板里的「一键启动」即等价 `restart_services`（含隧道健康门）：
+
+- **仪表盘**：6 服务状态、隧道 health、自启 6 项、看门狗心跳、启动日志；
+  一键启动 / 停止（走 start_services 健康门）
+- **配置**：表单直写 `fp.config.json` —— **合并写入**（不动 apps/vision
+  既有条目），密钥字段留空 = 保持原值；保存后提示是否需重启生效
+- **控制**：开机自启开关、聊天窗口归位（park/unpark）、一键卸载
+  （输入确认防误触，可选清除数据）、打开日志、跑 `setup.py --check`
+- 自检：`fxxkpush_gui.py --smoke`（无窗口六项断言 + 真开窗 UI 探针）
+
 ## 快速上手
 
 前提：一台有公网 IP 的 Linux VPS + 一台 Windows PC（Win10/11）+ 手机装 ntfy 客户端。
@@ -164,7 +180,8 @@ systemctl is-active ntfy fuckpush-monitor   # 两个都应是 active
 ```powershell
 # Python 3.12（pywinrt 3.2.1 不支持 3.14）
 uv venv .venv --python 3.12
-uv pip install --python .venv httpx winotify paramiko winrt-runtime `
+uv pip install --python .venv httpx winotify paramiko psutil pillow `
+  pywebview pythonnet winrt-runtime `
   winrt-Windows.UI.Notifications.Management winrt-Windows.UI.Notifications `
   winrt-Windows.Foundation winrt-Windows.ApplicationModel winrt-Windows.Foundation.Collections
 
@@ -281,6 +298,8 @@ curl.exe -H "Authorization: Bearer $((Get-Content fp.config.json -Raw -Encoding 
 | `pc/services/watchdog.py` | PC (自启) | 管道自检：health / 进程 / 连接错误 / **磁盘**四项，连续 5 分钟不健康 → 绕过 AI 直推 fp-phone。告警走**三层降级**：本地隧道 → SSH 到 VPS → 本机 toast（零网络依赖，前两条共享同一个外部网络故障域，17:21 实测同时挂过）。进程死了还会在隧道健康时**自动拉起**；每轮写 `logs/watchdog.hb` 心跳文件，由 `notification_listener` 交叉检查（watchdog 没法监控它自己） |
 | `pc/bootstrap/restart_services.bat` | PC | 一键重启：调 `start_services.py`，带顺序与健康门 |
 | `vps_exec.py` | PC | SSH 执行助手：跑命令 / `--put` 上传（临时文件+原子替换，断线不会截断目标）/ `--get` |
+| `fxxkpush_gui.py` + `gui/` | PC | 图形化控制台（pywebview 液态玻璃 UI）：仪表盘 / 配置合并写入 / 启停 / 自启开关 / 窗口归位 / 一键卸载 |
+| `GUI.bat` | PC | GUI 入口：带控制台（可看输出 / 跑 `--smoke` 自检），**关闭 GUI 后控制台自动关闭**、仅失败时暂停；要求 `.venv` 已装依赖 |
 
 ## 误判反馈闭环怎么干预
 
@@ -355,7 +374,8 @@ VPS 侧不受影响，如需停用：`systemctl disable --now fuckpush-monitor n
 - [x] v0.5.0：P2 留档清仓（告警中文化、告警合并与恢复重试、视觉采集三态与直推、通知权限定时复查、告警三层降级、fp-vps 通道 fail-open、state 形状校验与原子写、夜间分段心跳）+ PC 侧分包重组（`pc/services`·`pc/core`·`pc/bootstrap`，一次性碎片归并，视觉监听更名 `vision_listener.py`）+ 配置示例脱敏
 - [x] v0.6.0：单一配置重构（仓库根 fp.config.json + pc/core/fpconfig.py 读取器，11 个消费方迁移、四份旧配置删除）+ vision 配置驱动（process/class/title 三层匹配与 settings 运行参数块）+ 自定义软件接入（apps 声明式分诊规则，闸门与视觉双通道消费）+ 发布脱敏与 README 基于 ntfy 声明
 - [x] v0.7.0：一键上手与稳定性加固 —— 注册自启动单文件（按当前目录探测项目根）+ 双侧一键（VPS `deploy/setup_vps.sh`、PC `setup.bat`/`setup.py` 向导与 `--check`）+ 一键卸载（`uninstall.bat`：停服务 / 摘自启 / 窗口归位，数据默认保留，`--purge` 全清）+ 取消 QQ 视觉适配（QQ 归 toast 主通道，消除最小化误报）+ 运行测试与全链路审查共 20 处修复（P0 SSH 兜底鉴权、硬规则入重发队列、配置 mtime 热加载、非 200 留 ERROR 等）
-- [ ] v0.8.0：视觉截图瘦身与留档 —— 企微全尺寸截图（1233×813 ≈ 132KB/张，微信 544×519 ≈ 45KB）识别前降采样，降低上传体积与识别成本；截图落盘并滚动保留 24 小时，清理时机 = 重新开机时 + 每日凌晨
+- [x] v0.8.0：图形化界面（GUI）—— pywebview + 液态玻璃控制台：仪表盘（服务/隧道/自启/看门狗/启动日志）、配置表单合并写入 fp.config（密钥留空保持）、一键启动/停止、自启开关、窗口归位、一键卸载（可选清数据）
+- [ ] v0.9.0：视觉截图瘦身与留档 —— 企微全尺寸截图（1233×813 ≈ 132KB/张，微信 544×519 ≈ 45KB）识别前降采样，降低上传体积与识别成本；截图落盘并滚动保留 24 小时，清理时机 = 重新开机时 + 每日凌晨
 - [ ] 钉钉 / 学习通等更多 App 深度适配
 - [ ] 每日日报（AI 汇总当天事件/误判，22:00 推手机；`fp_feedback.stats()` 已备好误判统计）
 - [ ] 误判样本 → 27B 模型微调（语料已在 `pc/feedback.jsonl` 自包含落地，缺训练流程）
