@@ -25,7 +25,7 @@ from winrt.windows.ui.notifications.management import (
 )
 
 # ---------- config ----------
-NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586")  # via SSH tunnel (see pc/ntfy_tunnel.py)
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")  # via SSH tunnel (see pc/ntfy_tunnel.py)
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
                 str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fpconfig/fp_feedback/alert_fallback
 import fpconfig
@@ -125,7 +125,17 @@ def is_our_toast(texts) -> bool:
                     or ts < cutoff:
                 continue
             fp = _norm(f'{rec.get("title", "")} {rec.get("msg", "")}')[:200]
-            if fp and (fp == incoming or fp in incoming or incoming in fp):
+            # 子串匹配只在**两端都够长**时启用。echo 记录的 title/msg 是 ntfy
+            # 消息原文（远端可控）——一条极短的 echo（msg="a"）会在 180s 窗口里
+            # 子串命中几乎所有通知文本，把真实通知**整批静默**（不入队不归档），
+            # 而且只要消息还在继续推就一直续窗 = 通道级拒服。两端 ≥10 字符时
+            # 照旧双向子串（那才是为了吃掉 toast 渲染差异）；短文本退回严格
+            # 相等 —— 误配的代价只是那条 toast 被重新分诊一次（多推一次），
+            # 远好过吞掉整批通知。winotify/PowerShell 的 title+msg 拼起来通常
+            # 远超 10 字符，常规回环检测不受影响。
+            if fp and (fp == incoming or
+                       (len(fp) >= 10 and len(incoming) >= 10
+                        and (fp in incoming or incoming in fp))):
                 return True
     except Exception:
         return False
@@ -510,7 +520,16 @@ async def main():
     #   - 之后每次重启：这些是「服务没在时才到达」的，补发。cap 30 是给
     #     state 被写坏导致 seen 清空那次兜底的 —— 那种情况下通知中心里全是
     #     「没见过」的，不设上限等于把历史一股脑怼给手机。
-    pre = await poll_once(listener, seen)
+    # R3：启动补发这一段原来在 try 之外 —— poll_once 是 WinRT 调用
+    # （get_notifications_async 在通知库忙/权限抖动时会抛），它一抛就冒到
+    # asyncio.run → excepthook → os._exit(1)：**服务启动即死**，而主循环里
+    # 同一个调用是被 try 包着的（"poll error" 一行继续跑）。启动路径不该比
+    # 运行路径更脆；失败就当 0 条，下一轮正常轮询会补回来。
+    try:
+        pre = await poll_once(listener, seen)
+    except Exception as e:
+        log(f"startup poll failed ({e!r}) —— 本轮跳过补发，主循环继续")
+        pre = []
     if first_run:
         log(f"first run: {len(pre)} 条存量通知标记为 seen（不发布）")
     else:
@@ -618,4 +637,11 @@ async def _probe_access() -> int:
 if __name__ == "__main__":
     if "--grant-access" in sys.argv:
         sys.exit(asyncio.run(_probe_access()))
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # 前台 Ctrl+C 是人为停服务，不是崩溃（见 ai_triager 同款注释）：
+        # 本模块的 excepthook 是 _log_crash —— 不拦的话一次人工停止会往
+        # notification_listener.log 里写一条 FATAL/[ERROR]，watchdog.check_link
+        # 会把它算成服务报错。watchdog/pc_subscriber/ntfy_tunnel 都是干净退出。
+        sys.exit(0)

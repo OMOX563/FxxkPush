@@ -54,6 +54,10 @@ ROOT = _detect_root()
 VENV = ROOT / ".venv"
 VPY = VENV / "Scripts" / "python.exe"
 CONFIG = ROOT / "fp.config.json"
+# 健康端点与各服务同口径（FP_NTFY_URL 的「不启隧道直连」模式，见 README）——
+# 写死 127.0.0.1 会让那个模式下向导的健康验证恒失败。
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
+HEALTH_URL = f"{NTFY_BASE}/v1/health"
 
 DEPS = [
     "httpx", "winotify", "paramiko", "psutil", "pillow",
@@ -426,7 +430,7 @@ def step_park() -> bool:
 def step_verify() -> bool:
     say("\n== 7/7 健康验证 ==")
     try:
-        with urllib.request.urlopen("http://127.0.0.1:2586/v1/health", timeout=8) as r:
+        with urllib.request.urlopen(HEALTH_URL, timeout=8) as r:
             code = r.status
     except Exception as e:                                  # noqa: BLE001
         fail(f"隧道健康检查失败: {e!r}")
@@ -487,7 +491,7 @@ def do_check() -> int:
     results.append((f"开机自启 {good}/6（路径可达）", good == 6))
 
     try:
-        with urllib.request.urlopen("http://127.0.0.1:2586/v1/health", timeout=5) as r:
+        with urllib.request.urlopen(HEALTH_URL, timeout=5) as r:
             results.append((f"服务健康 health={r.status}", r.status == 200))
     except Exception as e:                                  # noqa: BLE001
         results.append((f"服务健康（{type(e).__name__}，未启动或隧道不通）", False))

@@ -122,30 +122,40 @@ def run_ps(cmd: str, timeout: int = 60) -> tuple[int, str]:
         return 1, repr(e)
 
 
-def list_service_pids() -> list[str]:
-    _, out = run_ps(_PS_LIST)
-    return [ln.strip() for ln in out.splitlines() if ln.strip().isdigit()]
+def list_service_pids() -> tuple[int, list[str]]:
+    """(powershell 退出码, 匹配到的 pid 列表)。rc 必须一起回传 —— 见 step_stop。"""
+    rc, out = run_ps(_PS_LIST)
+    return rc, [ln.strip() for ln in out.splitlines() if ln.strip().isdigit()]
 
 
 def step_stop(dry: bool) -> bool:
     say("\n== 1/3 停止服务进程 ==")
-    pids = list_service_pids()
+    rc, pids = list_service_pids()
+    # r7-12 同型（start_services 那侧早就修过）：**枚举失败 ≠ 没有进程**。
+    # PowerShell 被安全软件拦掉 / 冷启动失败时 run_ps 返回非零、stdout 为空，
+    # 原实现拿它算出空列表 → 打印「无运行中的服务进程」继续往下走，用户以为
+    # 服务停了，实际还在跑（接着卸载/重装就是新旧并存）。枚举不出来就如实说。
+    if rc != 0:
+        fail(f"无法枚举服务进程（powershell rc={rc}），本步未确认已停止")
+        return False
     if not pids:
         ok("无运行中的服务进程")
         return True
     if dry:
         say(f"  [dry] 将结束 {len(pids)} 个进程: {', '.join(pids)}")
         return True
-    _, out = run_ps(_PS_KILL)
-    killed = [ln.strip() for ln in out.splitlines() if ln.strip().isdigit()]
+    run_ps(_PS_KILL)
     # 给进程退出一点时间
     import time
     time.sleep(1.5)
-    left = list_service_pids()
+    rc2, left = list_service_pids()
+    if rc2 != 0:
+        fail(f"停止后无法枚举进程（powershell rc={rc2}），未确认是否全部退出")
+        return False
     if left:
         fail(f"仍有 {len(left)} 个进程未退出: {', '.join(left)}")
         return False
-    ok(f"已结束 {len(killed)} 个服务进程")
+    ok(f"已结束 {len(pids)} 个服务进程")
     return True
 
 

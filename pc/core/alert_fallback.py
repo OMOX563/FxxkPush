@@ -174,7 +174,12 @@ def push_toast(title: str, message: str, log) -> bool:
         p = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive",
              "-WindowStyle", "Hidden", "-Command", ps],
-            capture_output=True, text=True, timeout=20, env=env,
+            # errors="replace"：text 模式下 stderr 用**locale 编码**解码，PowerShell
+            # 在非中文 Windows / cp65001 控制台下吐的字节解不出就 UnicodeDecodeError
+            # —— 那会被下面的 except 接住、整条 toast 判失败，而这是三层降级的
+            # 最后一道防线（零网络依赖）。解码烂掉只影响日志可读性，不该要通道的命。
+            capture_output=True, text=True, errors="replace",
+            timeout=20, env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out = (p.stdout or "").strip()
         if p.returncode == 0 and "SHOWN" in out:

@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 
 # ---------- config ----------
-NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586")  # via SSH tunnel (see pc/ntfy_tunnel.py)
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")  # via SSH tunnel (see pc/ntfy_tunnel.py)
 TOPICS = ["fp-vps", "fp-gray"]  # VPS hard alerts + gray-zone events
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/

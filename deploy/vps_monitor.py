@@ -291,7 +291,17 @@ def check_units():
                           f"journalctl -u {unit} -n 50 --no-pager",
                           priority=4, tags=["boom"])
         else:
-            gray("unit-failed", {"unit": unit})
+            # 非监控 unit 也只在**首次进入 failed**时报一次灰区。原来每个循环
+            # （60s）把同一个常挂单元原样重报一遍 —— 而 PC 侧每条灰区都要过一次
+            # AI 分诊（fp-gray → ai_triager classify → 归档），一个常驻 failed
+            # 单元 = 每天上千次 API 调用 + fp-gray/gray.log 满屏同款噪音。
+            # check_disk 的同款逻辑特意写了「只在数值变化时报」的去重，这里漏了
+            # （同一个概念两份口径）。复用 seen 的生命周期：恢复时下面的清理一并
+            # 把它清出，修好再挂会重新报一次；重启后 load_state 会带回 seen，
+            # 不会因为重启又刷一轮。
+            if unit not in seen:
+                gray("unit-failed", {"unit": unit})
+            seen.setdefault(unit, time.time())
     # P2-1：已恢复的 unit 清出计时，下次再挂从零开始
     for u in [k for k in list(seen) if k not in failed]:
         seen.pop(u, None)

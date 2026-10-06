@@ -224,7 +224,6 @@ def _trim_inplace(path, keep: int) -> None:
             return
         f.seek(size - keep)
         f.readline()                    # 丢掉可能被截断的半行
-        pos = f.tell()
         data = f.read()
         f.seek(0)
         f.write(data)

@@ -11,6 +11,7 @@ the same single config the PC services read (never committed to git).
 """
 import sys
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -40,8 +41,18 @@ def connect():
 
 def run(cli, cmd):
     stdin, stdout, stderr = cli.exec_command(cmd, timeout=120)
+    # 两条流必须**同时**在读：paramiko 的通道窗口只有 2MB
+    # （DEFAULT_WINDOW_SIZE = 64*2**15），本地一直不 recv stderr 的话窗口很快
+    # 耗尽 → 远端写 stderr 阻塞 → 永远走不到 stdout 的 EOF，而下面的
+    # stdout.read() 正在等 EOF —— 两边互相等死。exec_command 的 timeout 只管
+    # 「发起命令」，管不到这里的 read，所以一挂就是挂到 Ctrl+C。
+    # stderr 交给后台线程排空；打印顺序保持原样（先 stdout 后 stderr）。
+    err_chunks: list[bytes] = []
+    t = threading.Thread(target=lambda: err_chunks.append(stderr.read()), daemon=True)
+    t.start()
     out = stdout.read().decode("utf-8", "replace")
-    err = stderr.read().decode("utf-8", "replace")
+    t.join(30)                      # 通道关闭后 stderr.read() 立即返回，正常恒在毫秒级
+    err = b"".join(err_chunks).decode("utf-8", "replace")
     rc = stdout.channel.recv_exit_status()
     if out:
         print(out, end="")

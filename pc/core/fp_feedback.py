@@ -242,7 +242,7 @@ def _save_rules(rules: dict) -> None:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
-        log(f"rules save failed —— 本次规则更新未落盘，下次反馈重试")
+        log("rules save failed —— 本次规则更新未落盘，下次反馈重试")
         raise
     _rules_cache = rules
     try:

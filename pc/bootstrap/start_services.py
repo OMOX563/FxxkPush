@@ -24,7 +24,10 @@ import psutil
 
 HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/bootstrap/）
 PYW = HERE.parent / ".venv" / "Scripts" / "pythonw.exe"
-NTFY_BASE = "http://127.0.0.1:2586"
+# FP_NTFY_URL 与各服务同口径（README 的「不启隧道直连」模式）：健康门写死
+# 127.0.0.1 的话，那个模式下 4 个服务连的是直连地址、健康门却在等隧道 ——
+# 启动必然中止在「隧道 health 未通过」，文档承诺的模式根本起不来。
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
 HEALTH_URL = f"{NTFY_BASE}/v1/health"
 HEALTH_TIMEOUT = 60        # 秒：隧道要多久才算真起不来
 POST_HEALTH_DELAY = 1.5    # health 200 后给隧道一点热身时间
@@ -72,7 +75,8 @@ def _our_procs(include_self: bool = True) -> list[tuple[int, str]]:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
             low = cmd.lower()
-            if "fuckpush\\pc\\" not in low:
+            # 反斜杠与正斜杠都认（与 watchdog._our_pythons / GUI._our_scripts 同口径）
+            if "fuckpush\\pc\\" not in low and "fuckpush/pc/" not in low:
                 continue          # 只动自己，Hermes 等其它 pythonw 不碰
             if not include_self and "start_services" in low:
                 continue          # 不杀自己
@@ -218,7 +222,7 @@ def _main() -> int:
         LOG.error("隧道日志最后几行:\n" + tail(HERE / "logs" / "ntfy_tunnel.log"))
         print(f"\n[失败] 隧道 health 未通过（{HEALTH_TIMEOUT}s 内）：{detail}")
         print("后面的服务已按要求不起 —— 没有隧道，它们只会空转刷错。")
-        print("排查: logs/ntfy_tunnel.log  |  fp.config.json 的 vps 块是否正确 / SSH 端口是否通")
+        print("排查: pc/logs/ntfy_tunnel.log  |  fp.config.json 的 vps 块是否正确 / SSH 端口是否通")
         # P2-2：健康门失败也必须把 watchdog 起起来。原来 return 2 发生在
         # start(ORDER[1:]) 之前，于是**这次重启之后整机零告警能力** ——
         # 控制台还能看见（人工跑的时候），一旦挂成计划任务/静默重启就是

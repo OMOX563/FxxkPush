@@ -207,16 +207,33 @@ def vision() -> tuple[dict, dict, list[str]]:
         if not isinstance(spec, dict) or not spec.get("process"):
             problems.append(f"[{key}] 配置无效（至少要有 process 字段），跳过")
             continue
+        # process 必须是字符串：手改配置写成数字/对象时，find_target 开头那句
+        # ``(spec.get("process") or "").lower()`` 直接 AttributeError —— 而它
+        # 在 vision main() 的启动循环里（excepthook 已挂 → FATAL + os._exit(1)），
+        # 一个写错类型的字段就能让整个视觉服务起不来。与 title 正则、min_w 的
+        # 类型收敛是同一批手改配置防线。
+        if not isinstance(spec.get("process"), str):
+            problems.append(f"[{key}] process 不是字符串({spec['process']!r})，跳过")
+            continue
         if not spec.get("enabled", True):
             problems.append(f"[{key}] enabled=false，跳过")
             continue
         if spec.get("title"):
             try:
                 re.compile(spec["title"])
-            except re.error as e:
-                problems.append(f"[{key}] title 正则非法: {e}，跳过")
+            except (re.error, TypeError) as e:
+                # TypeError = title 不是字符串（re.compile(123)）：只接 re.error
+                # 的话这个异常会穿出 vision() → 导入期崩、视觉服务启动即死；
+                # 与「正则非法」同判 —— 这个目标本轮跳过。
+                problems.append(f"[{key}] title 正则非法({type(spec['title']).__name__}): {e}，跳过")
                 continue
         spec = dict(spec)                   # 拷贝后再收敛，别改缓存
+        # class 非字符串时，find_target 回调里的 `want_cls not in c.value` 抛
+        # TypeError —— ctypes **吞掉回调异常并中止枚举**（EnumWindows 收到
+        # FALSE 就停），表现成「窗口未开启」的静默误判，比直接报错还难查。
+        if spec.get("class") is not None and not isinstance(spec.get("class"), str):
+            problems.append(f"[{key}] class 非字符串({spec['class']!r})，已忽略该匹配条件")
+            spec.pop("class")
         try:
             spec["min_w"] = int(spec.get("min_w", 400))
         except (TypeError, ValueError):

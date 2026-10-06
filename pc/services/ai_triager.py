@@ -47,9 +47,18 @@ def _ai() -> dict:
     直推（日志每天几千行 classify failed），要重启服务才恢复。ntfy token 正是
     为同一形态改成了惰性读取（第 5 轮 P2），ai 块一直没跟上。fpconfig 内部的
     ``if not 空才缓存 / mtime 变了重读`` 语义现在对 ai 块同样生效，与
-    rules_for「改完即刻生效」的热重载口径一致；配置不变时只多一次 stat。"""
+    rules_for「改完即刻生效」的热重载口径一致；配置不变时只多一次 stat。
 
-NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586")  # via SSH tunnel (see pc/ntfy_tunnel.py)
+    R3 P0：本函数原来**只有 docstring 没有 return**（R2 把 ``CONFIG =
+    fpconfig.ai()`` 换成惰性函数时漏了返回值）—— 返回 None，于是
+    ``main()`` 第一行 ``_ai()['model']`` 就 TypeError，excepthook 记 FATAL
+    后 os._exit(1)：**triager 启动即死**；即便绕过启动行，classify 与
+    dedup_check 也各炸各的（前者被 handle 兜成 fail-open 全量推送、后者让
+    每条消息 handle failed）。一行返回值就是这条链的全部。"""
+    return fpconfig.ai()
+
+
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")  # via SSH tunnel (see pc/ntfy_tunnel.py)
 # token 惰性读取见下面的 ntfy_token()：fpconfig 非空才缓存、失败/空不缓存，
 # 导入期读一次把 AV 抖动永久定成空串的坑（空 `Bearer ` 是非法头值）由
 # fpconfig 的契约兜住。
@@ -357,7 +366,7 @@ async def push_phone(client, title, message, priority=4, actions=None):
 
 
 async def flush_pending(client, st):
-    """P1-2 �发：把推送失败的那条重新发一遍，超时才放弃。
+    """P1-2 重发：把推送失败的那条重新发一遍，超时才放弃。
 
     与 consume 同生共死（由 main 挂进同一个 tasks 列表，client 重建时一起
     cancel）。每 15s 出队一条：失败回**队尾**（不阻塞后面别的消息），成功就
@@ -489,7 +498,8 @@ async def handle_event(client, st, topic, ev):
     # 无害，漏推致命。不按 priority 分流有两重原因：_unwrap 只透传
     # title/message（SSE 原始事件的 priority 已被丢弃，实测 L536/547），
     # 以及 priority=3 的 SSH 登录同样是硬规则、分流会漏它。VPS 侧 cooldown
-    # （disk/unit 30min、ssh 24h）才是这里唯一的去重权威。
+    # 才是这里唯一的去重权威（vps_monitor 实际取值：disk 3600s=60min、
+    # unit-failed 1800s=30min、ssh-login 86400s=24h）。
     if topic == "fp-vps":
         archive({"ts": time.time(), "topic": topic, "src": src,
                  "content": content, "label": "重要",
@@ -791,4 +801,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # 前台 Ctrl+C 是**人为停服务**，不是崩溃：本模块把 excepthook 换成了
+        # _log_crash（记 FATAL/[ERROR] 行 + os._exit(1)），KeyboardInterrupt
+        # 同样走它 —— 一次人工停止会在 ai_triager.log 里留一条假 ERROR
+        # （watchdog.check_link 认 [ERROR]），日志也变成「服务是被谁弄死的」
+        # 查不清。watchdog/pc_subscriber/ntfy_tunnel 都是干净退出，这里对齐。
+        sys.exit(0)

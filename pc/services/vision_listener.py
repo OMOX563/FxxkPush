@@ -40,7 +40,7 @@ import httpx
 import psutil
 
 HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
-NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586")  # via SSH tunnel (see pc/services/ntfy_tunnel.py)
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")  # via SSH tunnel (see pc/services/ntfy_tunnel.py)
 
 sys.path[:0] = [str(HERE),                    # pc/
                 str(HERE / "core")]           # 公共件 pclog/fpconfig/fp_feedback/alert_fallback
@@ -818,4 +818,11 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] in ("list", "--list"):
         list_main()
     else:
-        main()
+        try:
+            main()
+        except KeyboardInterrupt:
+            # 前台 Ctrl+C 是人为停服务，不是崩溃：本模块的 excepthook 是
+            # _log_crash（FATAL/[ERROR] 行 + os._exit(1)），KeyboardInterrupt
+            # 同样走它 —— 一次人工停止会在 wechat_vision.log 里留一条假 ERROR，
+            # 还会被 watchdog.check_link 计进错误数。与其余三个服务的干净退出对齐。
+            sys.exit(0)

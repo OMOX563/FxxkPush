@@ -34,7 +34,12 @@ from pathlib import Path
 import httpx
 
 HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
-NTFY_BASE = "http://127.0.0.1:2586"
+# FP_NTFY_URL：与另外 4 个服务同一口径（README「手机」一节写明「把各服务里的
+# FP_NTFY_URL 设为直连地址即可，隧道可以不启动」）。原来这里写死 127.0.0.1 ——
+# 那个模式下 4 个服务全连直连地址、而 watchdog 的 health/告警还在打隧道，
+# 结果 health 恒红 + 每 5 分钟一条假告警。rstrip("/") 防 ``{base}/{topic}``
+# 拼成 `//topic`（README 的 systemd 示例就带尾斜杠）。
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
 HEALTH_URL = f"{NTFY_BASE}/v1/health"
 LOG_DIR = HERE / "logs"
 
@@ -104,7 +109,7 @@ CHECK_DEBUG = {
     "vps": "VPS 上: journalctl -u fuckpush-monitor -n 50 --no-pager",
     "link": "pc/logs/<出错服务>.log（详情已附最近一条错误原文）",
     "quiet": "详情点名的服务对应的 pc/logs/<stem>.log",
-    "procs": "详情点名的服务对应的 pc/logs/<stem>.log；pc/start_services.py",
+    "procs": "详情点名的服务对应的 pc/logs/<stem>.log；pc/bootstrap/start_services.py",
 }
 
 
@@ -188,7 +193,12 @@ def _our_pythons() -> list[str]:
             if (p.info.get("name") or "").lower() != "pythonw.exe":
                 continue
             cmd = " ".join(p.cmdline() or [])
-            if "fuckpush\\pc\\" in cmd.lower():
+            # 反斜杠与正斜杠都认：GUI._our_scripts 一直是两种都匹配，这里只认
+            # `fuckpush\pc\` —— 同一个概念两份口径，用 `python pc/services/xx.py`
+            # 这类正斜杠命令行手动起的服务在 watchdog 眼里会「进程缺失」（误报
+            # + revive 补刀），而 GUI 又说它在跑，两份状态互相打架。
+            low = cmd.lower()
+            if "fuckpush\\pc\\" in low or "fuckpush/pc/" in low:
                 out.append(cmd)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -589,28 +599,43 @@ def send_canary() -> bool:
 
     走 send_alert 全链（local -> vps -> toast）：canary 本身也是对三层降级
     的日常演练。payload 用 priority=1（最低档，只入列不响铃）。
+
+    R3：与 send_alert 同一条 r8 P1-2 边界 —— **每层各自 try**。原来整个函数
+    一个大 try 包到底，于是 payload 组装（或任何一层自己没接住的异常）会直接
+    跳到 except 返回 False，后面的层**一次都没试过**；send_alert 早就为这个
+    形态逐层隔离了，同一条降级链上的 canary 没跟上（改一处漏一处）。
     """
+    payload = None
     try:
         payload = _ntfy_payload(CANARY_TITLE,
                                 "金丝雀：手机最后一跳是否可达，看这条。"
                                 "固定每 24h 一条；哪天没收到 = App 退订/被杀/"
                                 "勿扰吞了通知。")
         payload["priority"] = 1     # 最低档：能入列就行，别响铃
-        if push_local(payload):
-            LOG.info("canary 已送达(本地隧道)")
-            return True
-        if push_vps(payload, LOG):
-            LOG.info("canary 已送达(VPS-SSH兜底)")
-            return True
+    except Exception as e:
+        LOG.error(f"canary payload build failed: {e!r}")
+    if payload is not None:
+        try:
+            if push_local(payload):
+                LOG.info("canary 已送达(本地隧道)")
+                return True
+        except Exception as e:
+            LOG.error(f"canary local channel raised: {e!r}")
+        try:
+            if push_vps(payload, LOG):
+                LOG.info("canary 已送达(VPS-SSH兜底)")
+                return True
+        except Exception as e:
+            LOG.error(f"canary vps channel raised: {e!r}")
+    try:
         if push_toast(CANARY_TITLE,
                       "canary：两条网络通道都失败（本机 toast 兜底）", LOG):
             LOG.warning("canary 仅本机 toast（网络通道全失败，本身即故障信号）")
             return True
-        LOG.error("canary 三条通道都失败")
-        return False
     except Exception as e:
-        LOG.error(f"canary 异常: {e!r}")
-        return False
+        LOG.error(f"canary toast channel raised: {e!r}")
+    LOG.error("canary 三条通道都失败")
+    return False
 
 
 # ---------------------------------------------------------------- 主循环

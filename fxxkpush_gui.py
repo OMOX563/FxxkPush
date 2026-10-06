@@ -55,6 +55,10 @@ import pclog  # noqa: E402   # 只用 read_tail（不 get_logger，GUI 不该持
 # 会在登录时弹 6 个黑窗；pythonw 无窗口子系统，双击 GUI 也绝不带控制台。
 VENV_PY = ROOT / ".venv" / "Scripts" / "pythonw.exe"
 GUI_HTML = ROOT / "gui" / "index.html"
+# 健康端点与 4 个服务同口径（README 的「不启隧道、FP_NTFY_URL 直连」模式）：
+# 写死 127.0.0.1 的话，那个模式下仪表盘 health 恒红、start 也过不了健康门。
+NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
+HEALTH_URL = f"{NTFY_BASE}/v1/health"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 SA_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 AUTOSTART = {
@@ -195,7 +199,7 @@ def _read_version() -> str:
 
 def _health() -> tuple[int | None, str]:
     try:
-        req = urllib.request.Request("http://127.0.0.1:2586/v1/health")
+        req = urllib.request.Request(HEALTH_URL)
         with urllib.request.urlopen(req, timeout=4) as r:
             return r.status, f"HTTP {r.status}"
     except Exception as e:                                      # noqa: BLE001
@@ -276,9 +280,18 @@ def _job_start() -> None:
 
 def _job_stop() -> None:
     _set_job("stop", state="running", detail="结束服务进程")
-    rc, out = _run_ps(PS_KILL)
+    _run_ps(PS_KILL)
     time.sleep(1.5)
-    _, left = _run_ps(PS_SCRIPTS)
+    rc2, left = _run_ps(PS_SCRIPTS)
+    # r7-12 同型（start_services 那侧早就修过）：**枚举失败 ≠ 没有进程**。
+    # PowerShell 被安全软件拦掉/冷启动失败时 rc2 != 0、stdout 为空 —— 原实现
+    # 拿它算出 n_left=0，直接报「已全部停止」，而服务其实还活着；前端据此显示
+    # 已停，用户接着点「一键启动」= 新旧进程并存（双 toast、双分诊、抢 state）。
+    if rc2 != 0:
+        _set_job("stop", state="done", rc=1,
+                 detail=f"停止后无法枚举进程（powershell rc={rc2}），未确认是否全停： "
+                        f"{(left or '').strip()[:80]}")
+        return
     n_left = len([x for x in left.splitlines() if x.strip()])
     _set_job("stop", state="done", rc=0 if n_left == 0 else 1,
              detail=f"剩余 {n_left} 个进程" if n_left else "已全部停止")
@@ -444,9 +457,20 @@ def _save_config_impl(form: dict) -> dict:
                 "msg": "内容无变化，未写入"}
 
     tmp = fpconfig.PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    tmp.replace(fpconfig.PATH)
+    try:
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(fpconfig.PATH)
+    except OSError:
+        # 与 setup.step_config 同型：写/替换失败（磁盘满、AV 拦截）先把半截
+        # tmp 清掉再上抛 —— 仓库根目录的 *.tmp 没有任何清理方（ai_triager 的
+        # _clean_tmp 只扫 pc/），留一个就是一个永久孤儿。上层 save_config 会把
+        # 这个异常变成给用户看的错误提示，不会静默。
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     fpconfig.reset()
     need_restart = any(c.split(".")[0] in ("ai", "ntfy", "vision")
                        for c in changed)
