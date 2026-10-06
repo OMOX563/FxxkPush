@@ -83,7 +83,12 @@ PURGE_FILES = [
     "pc/triage_state.json",
     "pc/vision_state.json",
     "pc/triage_rules.json",
-    "pc/bootstrap/.start_services.lock",
+    # 锁文件的实际位置是 **pc/**：start_services.HERE = parents[1] = pc，
+    # LOCK = HERE / ".start_services.lock"。原来写成 pc/bootstrap/ 是照着
+    # 文件所在目录猜的，那个路径**永远不存在** —— --purge 会报「已清除 N 项」
+    # 却把锁文件留在仓库里（陈旧锁靠 pid 探活自动接管，不致卡死，但清单里
+    # 这条一直是死的）。
+    "pc/.start_services.lock",
 ]
 
 

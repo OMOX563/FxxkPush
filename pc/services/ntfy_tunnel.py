@@ -10,6 +10,7 @@ All PC-side services should talk to http://127.0.0.1:2586.
 Credentials: fp.config.json 的 vps 块（fpconfig.vps()），与 vps_exec.py 同源。
 Run detached; auto-reconnects on drop.
 """
+import os
 import select
 import socket
 import sys
@@ -34,6 +35,29 @@ def log(msg):
     # tunnel used to print to a console that pythonw does not have — every
     # line it ever produced was silently lost. pclog writes to pc/logs too.
     pclog.log_auto(LOG, msg)
+
+
+def _log_crash(exc_type, exc, tb):
+    """未捕获异常要留痕 —— 6 个服务里原来只有本文件和 pc_subscriber 没有。
+
+    pythonw 下没有控制台，不挂 excepthook 的话崩溃既不进 pc/logs 也不留任何
+    证据：watchdog 只看得到「进程没了 + 日志静默」（procs/quiet 两条判据），
+    查不出隧道**为什么**断。ai_triager / notification_listener / vision_listener
+    / watchdog 四家早就有（watchdog 的 _log_crash docstring 把「没有 hook 就
+    连 FATAL 都进不了 pclog」写成过 P0），这里是同一批里的漏网。
+    KeyboardInterrupt 不会走到这里 —— __main__ 的 try/except 先接住（人工停
+    服务不算崩溃）。
+    """
+    import traceback
+    msg = "FATAL " + "".join(traceback.format_exception(exc_type, exc, tb)).strip()
+    try:
+        log(msg[-2000:])            # 日志句柄坏掉也不能挡住退出
+    except Exception:
+        pass
+    os._exit(1)
+
+
+sys.excepthook = _log_crash
 
 
 def read_secret():

@@ -115,11 +115,20 @@ def is_our_toast(texts) -> bool:
                 # 原来这里会冒泡到外层 except -> return False，之后窗口期内
                 # 自己弹出的 toast 全被当成新通知，直接重推一遍。
                 continue
+            # 记录本身也要校型：`json.loads` 合法但不是对象（字符串/数字/
+            # null —— 半行恰好收在合法 JSON 上、或手改出来的行）时下面
+            # `rec.get("ts")` 直接 AttributeError，而它落在**外层** try 里
+            # → `except Exception: return False` = 这一次回环检测整体作废，
+            # 窗口期内自己弹的 toast 全被当成新通知重推一遍。和 ts 校型、
+            # replay_failed / fp_feedback.stats 的 `isinstance(rec, dict)`
+            # 是同一型的缺口，那里补了这里一直没补。
+            if not isinstance(rec, dict):
+                continue
             # ts 也要校型：echo 记录是 append-only 的 jsonl，半行/手改出
             # "ts": "2026-09-..." 时 `str < float` 抛 TypeError，被下面的
             # 外层 except 接住 -> 整次回环检测直接 return False（窗口期内
-            # 自己弹的 toast 全被当成新通知重推一遍）。坏行跳过即可，
-            # 与 replay_failed / fp_feedback.stats 的同型防护对齐。
+            # 自己弹的 toast 全被当成新通知重推一遍）。坏行跳过即可，与
+            # replay_failed / fp_feedback.stats 的同型防护对齐。
             ts = rec.get("ts")
             if not isinstance(ts, (int, float)) or isinstance(ts, bool) \
                     or ts < cutoff:

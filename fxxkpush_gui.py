@@ -187,14 +187,33 @@ def _cap_log(path: Path, limit: int = 512 * 1024, keep: int = 128 * 1024) -> Non
         pass
 
 
+_ver_cache: tuple[int, str] | None = None   # (README mtime_ns, 版本号)
+
+
 def _read_version() -> str:
+    # get_status 每 2.5s 轮一次，每次都整读 28KB 的 README 再 splitlines 取
+    # 第一行 —— 版本号在一次 GUI 会话里不会变，纯属重复读盘（28KB × 24 次/分
+    # ≈ 1GB/天的页缓存读，全为一个常量）。按 mtime 缓存：README 一改（发版）
+    # 立刻生效，与 fpconfig.raw() 的「mtime 变了重读」同口径；读失败不缓存
+    # （AV 抖动不该把版本号钉死成 "?"）。
+    global _ver_cache
+    p = ROOT / "README.md"
     try:
-        first = (ROOT / "README.md").read_text(encoding="utf-8",
-                                                errors="replace").splitlines()[0]
-        m = re.search(r"v(\d+\.\d+\.\d+)", first)
-        return m.group(1) if m else "?"
+        mtime = p.stat().st_mtime_ns
     except OSError:
         return "?"
+    if _ver_cache is not None and _ver_cache[0] == mtime:
+        return _ver_cache[1]
+    try:
+        first = p.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        # IndexError = 空文件：原实现只接 OSError，README 被截成 0 字节时
+        # 这里直接抛到 get_status 的调用方，整个仪表盘轮询失败。
+        return "?"
+    m = re.search(r"v(\d+\.\d+\.\d+)", first)
+    ver = m.group(1) if m else "?"
+    _ver_cache = (mtime, ver)
+    return ver
 
 
 def _health() -> tuple[int | None, str]:
@@ -377,7 +396,17 @@ def _spawn(name: str, fn, *a) -> dict:
 
 
 # ---------------- 配置写入（合并不覆盖） ----------------
+# 读-改-写必须整段串行：前端连点两次保存就是两个线程同时 raw(force=True)
+# 读同一份底稿、各改各的字段，后写的那份把先写的整个覆盖掉（丢更新）。
+_save_config_lock = threading.Lock()
+
+
 def _save_config_impl(form: dict) -> dict:
+    with _save_config_lock:
+        return _save_config_locked(form)
+
+
+def _save_config_locked(form: dict) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     host = str(form.get("host", "")).strip()
@@ -456,7 +485,16 @@ def _save_config_impl(form: dict) -> dict:
         return {"ok": True, "changed": [], "warnings": warnings,
                 "msg": "内容无变化，未写入"}
 
-    tmp = fpconfig.PATH.with_suffix(".json.tmp")
+    # 临时名必须带 pid —— 与 triage_state / listener_state / vision_state /
+    # triage_rules 同一口径（那里都写明了理由）。修这里之前，全仓**只剩**这里
+    # 和 setup.step_config 两个写点还在用固定名，而它俩写的是同一个
+    # fp.config.json.tmp：固定名 + 两个写者（GUI 双击保存 vs 向导重生成，或
+    # GUI 内部两个线程）会把 write_text 交错到同一块区域 —— 两个进程各写各的
+    # 字节流，落盘的就是**半截 JSON**，而 fp.config.json 是六个服务的唯一配置
+    # 源：fpconfig.raw() 从此恒返回 {}（AI 全 fail-open、隧道读不到 vps 块），
+    # 表面上却「已保存」。带 pid 后唯一临时名互不相撞，最坏也只是后写者覆盖
+    # 先写者（整份覆盖，仍是一份合法 JSON）。
+    tmp = fpconfig.PATH.with_name(f"{fpconfig.PATH.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
                        encoding="utf-8")

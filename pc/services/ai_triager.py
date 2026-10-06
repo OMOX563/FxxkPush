@@ -357,6 +357,20 @@ async def push_phone(client, title, message, priority=4, actions=None):
             payload["actions"] = actions
         r = await client.post(NTFY_BASE + "/", timeout=10, json=payload,
                               headers=_auth())
+        if r.status_code != 200:
+            # 非 200 必须在这里自己留 ERROR：调用方只会打 PUSH_FAIL /
+            # MENTION_PUSH FAIL / HARD_PUSH FAIL / PUSH_GIVEUP，这些串实测既不
+            # 匹配 pclog._ERR_PAT（要 "failed" / \berror\b）也不匹配
+            # watchdog._ERR_PAT（要 [ERROR]）→ **全部落 INFO**。于是 ntfy 对
+            # fp-phone 的**发布侧**回 403/500（token 对 publish 被吊销、topic ACL、
+            # 5xx）时手机一条都收不到，日志里却全是 INFO、link+quiet 双绿、
+            # watchdog 一声不吭 —— 与 notification_listener.publish 的
+            # 「ntfy publish failed: HTTP {code}」→ failed → ERROR、vision.push 的
+            # 「ntfy push failed: HTTP {code}」口径不一致（那两处的注释写明了
+            # 「watchdog.check_link 只数 [ERROR]，静默失败会让 link+quiet 双绿」）。
+            # 传输级异常走下面的 except 本来就有 ERROR，缺的只有这一支。
+            log(f"push_phone failed: HTTP {r.status_code} topic={TOPIC_OUT} "
+                f"priority={priority} [{title}]")
         return r.status_code == 200
     except Exception as e:
         # 传输失败要在这里变成 False：冒出去会把整条 SSE 断掉（见 consume），

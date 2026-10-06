@@ -54,6 +54,11 @@ ROOT = _detect_root()
 VENV = ROOT / ".venv"
 VPY = VENV / "Scripts" / "python.exe"
 CONFIG = ROOT / "fp.config.json"
+# 读配置走全仓唯一的 fpconfig —— 与六个服务、GUI 同一口径（支持 fp.config.json
+# 的 // 行注释）。setup 自身仍是纯标准库：fpconfig 只 import json/os/re/pathlib，
+# 且 _detect_root 已经确认过仓库结构（pc/services/ai_triager.py 在）。
+sys.path.insert(0, str(ROOT / "pc" / "core"))
+import fpconfig  # noqa: E402
 # 健康端点与各服务同口径（FP_NTFY_URL 的「不启隧道直连」模式，见 README）——
 # 写死 127.0.0.1 会让那个模式下向导的健康验证恒失败。
 NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
@@ -328,7 +333,12 @@ def step_config() -> bool:
     # Ctrl+C / 断电 / AV 打断就是半截 JSON —— 所有服务的 fpconfig.raw() 从此恒返回
     # {}（AI 全 fail-open、隧道读不到 vps 块），而报错只指向「配置坏了」不指向这里。
     # PC 侧 state/rules/GUI 的写点早就是 tmp+replace，这是最后一处裸直写。
-    tmp = CONFIG.with_name(CONFIG.name + ".tmp")
+    # 临时名带 pid：与 GUI._save_config_locked 写的是**同一个** fp.config.json，
+    # 固定名会把两个写者的 write_text 交错到同一块区域 → 落盘半截 JSON，而
+    # 这个文件是六个服务的唯一配置源（fpconfig.raw() 从此恒返回 {}）。
+    # 修这里之前，全仓其余写点（triage_state / listener_state / vision_state /
+    # triage_rules）早就是这个口径，只剩这里和 GUI 那侧两个固定名。
+    tmp = CONFIG.with_name(f"{CONFIG.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
                        encoding="utf-8")
@@ -471,7 +481,12 @@ def do_check() -> int:
 
     cfg_ok, detail = False, ""
     try:
-        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+        # 先剥 // 行注释再解析：fp.config.json 官方支持行注释
+        # （fpconfig._strip_comments，GUI 保存前也是先剥再比对），裸 json.loads
+        # 会把**合法的带注释配置**判成坏 —— 六个服务都读得好好的，--check 却
+        # 报 FAIL，用户会照着一句假故障去重跑配置向导（而向导默认就是覆盖）。
+        cfg = json.loads(fpconfig._strip_comments(
+            CONFIG.read_text(encoding="utf-8")))
         need = ("ai", "ntfy", "vps", "vision", "apps")
         cfg_ok = all(k in cfg for k in need)
         if cfg_ok:

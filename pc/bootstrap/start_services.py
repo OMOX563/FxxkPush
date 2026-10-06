@@ -126,23 +126,33 @@ def start(script: str) -> None:
 
 
 def wait_health(timeout: int = HEALTH_TIMEOUT) -> tuple[bool, str]:
-    """轮询隧道 health，直到 200 或超时。返回 (ok, 详情)。"""
+    """轮询隧道 health，直到 200 或超时。返回 (ok, 详情)。
+
+    复用同一个 Client（与 watchdog._health_cli 同一口径 —— R2 只修了那一侧，
+    这里才是重试次数最多的调用点）：顶层 httpx.get() 每次都要新建 Client +
+    连接池，本机实测比复用多 **300~400ms/次**（新连接要多走一趟 SSH
+    direct-tcpip 建链；复用 202~300ms vs 顶层 483~1031ms，各 8 次）。健康门
+    预算 60s、节奏 1.5s，最多 ~40 次尝试 = 白等 10s+，等于把有限的等待时间
+    花在建连上。trust_env 构造时固定 False，系统代理翻转不影响本连接。
+    池里的连接若在两次尝试之间被隧道重建掉，httpx 丢弃后抛错 —— 落进下面
+    的 except，与原来「新建连接失败」同一条路径，下一轮照常重试。
+    """
     tok = _token()
+    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     deadline = time.time() + timeout
     last = "未尝试"
     attempt = 0
-    while time.time() < deadline:
-        attempt += 1
-        try:
-            r = httpx.get(HEALTH_URL,
-                          headers={"Authorization": f"Bearer {tok}"} if tok else {},
-                          timeout=5, trust_env=False)
-            last = f"HTTP {r.status_code}"
-            if r.status_code == 200:
-                return True, f"attempt={attempt} {last}"
-        except Exception as e:
-            last = f"{type(e).__name__}: {e}"
-        time.sleep(1.5)
+    with httpx.Client(timeout=5, trust_env=False) as cli:
+        while time.time() < deadline:
+            attempt += 1
+            try:
+                r = cli.get(HEALTH_URL, headers=headers)
+                last = f"HTTP {r.status_code}"
+                if r.status_code == 200:
+                    return True, f"attempt={attempt} {last}"
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"
+            time.sleep(1.5)
     return False, f"attempt={attempt} 最后一次: {last}"
 
 

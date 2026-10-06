@@ -34,6 +34,30 @@ def log(msg):
     pclog.log_auto(LOG, msg)
 
 
+def _log_crash(exc_type, exc, tb):
+    """未捕获异常要留痕 —— 6 个服务里原来只有本文件和 ntfy_tunnel 没有。
+
+    pythonw 下 sys.stderr 既没有控制台也没有去处：不挂 excepthook 的话，一次
+    崩溃既不进 pc/logs 也不留任何证据，watchdog 只能看见「进程没了 + 日志静默」
+    （quiet/procs 两条判据），查不出**为什么**死。watchdog._log_crash 的 docstring
+    把这个形态写成过 P0；ai_triager / notification_listener / vision_listener /
+    watchdog 四家早就有，这里是同一批里的漏网。记完 FATAL 立即退出，与那四家
+    同口径（进程反正要死，区别只在有没有证据）。
+    KeyboardInterrupt 不会走到这里：__main__ 的 try/except 先接住了（人工停服务
+    不算崩溃，见 ai_triager 同款注释）。
+    """
+    import traceback
+    msg = "FATAL " + "".join(traceback.format_exception(exc_type, exc, tb)).strip()
+    try:
+        log(msg[-2000:])            # 日志句柄本身坏掉时也不能挡住退出
+    except Exception:
+        pass
+    os._exit(1)
+
+
+sys.excepthook = _log_crash
+
+
 def _auth() -> dict:
     """鉴权头。**空 token 时不带头**，且每次取不到都会重试（fpconfig 非空才缓存）。
 
@@ -94,9 +118,18 @@ def stream(client, topic):
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # json.loads 合法但不是对象（[1] / null / 123 / 裸字符串）时，
+            # 下面 handle 里的 ev.get 直接 AttributeError —— 落在 worker 的
+            # except 里变成一行 `[topic] handle failed` ERROR，会被
+            # watchdog.check_link 计进错误数，而真正的过滤点应该在这儿
+            # （ai_triager.consume 与 pclog.extract_trace 早就是这个口径，
+            # 这里是同类点的漏网）。
+            if not isinstance(ev, dict):
+                continue
+            yield ev
 
 def run():
     log(f"FuckPush PC subscriber starting, server={NTFY_BASE}, topics={TOPICS}")
@@ -180,6 +213,15 @@ def self_test():
     print("self-test publish:", r.status_code)
 
 if __name__ == "__main__":
-    if "--test" in sys.argv:
-        self_test()
-    run()
+    # 人工 Ctrl+C 是停服务、不是崩溃：本文件的 excepthook 已换成 _log_crash
+    # （FATAL/[ERROR] + os._exit(1)），不在这儿拦的话一次手动停止会往
+    # pc_subscriber.log 写一条假错误，watchdog.check_link 会把它计进错误数。
+    # run() 内部已经接住主循环里的 KeyboardInterrupt，这里兜 self_test() 和
+    # run() 进入前那一小段窗口（R3 给另外三个服务补的正是同一条）。
+    try:
+        if "--test" in sys.argv:
+            self_test()
+        run()
+    except KeyboardInterrupt:
+        log("bye")
+        sys.exit(0)
