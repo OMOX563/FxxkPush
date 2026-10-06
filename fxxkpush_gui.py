@@ -454,6 +454,18 @@ def _save_config_locked(form: dict) -> dict:
                                "是合法 JSON），为避免覆盖已有配置本次未保存 —— "
                                "请稍后重试"]}
     cfg = copy.deepcopy(raw_cfg or {})
+    if not cfg:
+        # 从零写入（文件不存在，或 0 字节空壳）：先把 setup 向导写的那 5 个
+        # 必需块立起来，再往里填表单字段。少了会怎样（实测 T6.8）：
+        #   ntfy/vision/apps 缺块 → setup --check 判「缺块」FAIL，而产品内两条
+        #   修复路径都不会补块 —— 向导默认「保留现有配置」，本函数只写表单字段；
+        #   vision 缺块还会让 vision_listener 每轮打「缺少 vision 块，无视觉目标」，
+        #   视觉通道空转到有人手编 JSON 为止。
+        # 立成 {} 的副作用为零：fpconfig 各读端本来就按「块在但字段缺」给默认值。
+        for sec in ("ai", "ntfy", "vps", "vision", "apps"):
+            cfg.setdefault(sec, {})
+        warnings.append("本次为从零创建配置：vision 目标清单 / apps 规则是空的，"
+                        "视觉通道不会扫描任何窗口，规则要另行配置")
     changed: list[str] = []
 
     def _put(section: str, key: str, value) -> None:

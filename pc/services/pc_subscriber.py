@@ -183,8 +183,12 @@ def run():
                     f"no message yet")
         # r7-10：线程全死会掉出上面的 while —— 这是「进程活着但订阅全断」，
         # 原来直接走到 except 外静默结束 run()，进程还挂着但什么都不订。
-        log("ALL stream threads exited — subscriber 死了，watchdog procs 仍绿但 "
-            "这条链路已断（r7-10），需要重启本服务")
+        # 措辞必须带 **两条判据都认** 的 "stream error"（pclog._ERR_PAT 的
+        # \berror\b、watchdog._ERR_PAT 的 stream error）：这行本来就是 r7-10
+        # 专门为该形态加的判据行，原措辞两边都不匹配 → 落 INFO，日志里和心跳
+        # 同级、事后 grep 也捞不出这条链路是何时断的。
+        log("stream error: ALL stream threads exited —— 订阅线程全灭，watchdog "
+            "procs 仍绿但这条链路已断（r7-10），需要重启本服务")
     except KeyboardInterrupt:
         log("bye")
 

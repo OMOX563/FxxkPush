@@ -647,7 +647,12 @@ if __name__ == "__main__":
     if "--grant-access" in sys.argv:
         sys.exit(asyncio.run(_probe_access()))
     try:
-        asyncio.run(main())
+        # main() 的返回值（0=正常循环退出 / 1=权限被拒）原来被 asyncio.run()
+        # 丢掉，进程恒以 0 退出 —— 那句 `return 1` 是死代码：授权被撤时日志里
+        # 有 DENIED，退出码却和正常停服务一模一样，setup --check / 排障脚本
+        # 拿 rc 判断「这个服务起得来吗」会得到假的绿。--grant-access 那条分支
+        # 早就是这个写法，这里对齐。
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         # 前台 Ctrl+C 是人为停服务，不是崩溃（见 ai_triager 同款注释）：
         # 本模块的 excepthook 是 _log_crash —— 不拦的话一次人工停止会往

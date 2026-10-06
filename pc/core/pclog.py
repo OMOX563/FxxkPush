@@ -148,7 +148,18 @@ def get_logger(service: str, level: int = logging.INFO) -> logging.Logger:
     if service in _configured:
         return _configured[service]
 
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    # get_logger 六个服务都是在 **import 期** 调的，而各自的 sys.excepthook
+    # （_log_crash）都排在这一行**之后** —— mkdir 抛 OSError 就等于「服务启动
+    # 即死且零痕迹」：pythonw 下连 traceback 都没地方去，watchdog 只看得到
+    # 「进程没了 + 日志静默」，查不出为什么。触发条件是 pc/logs 建不出来
+    # （权限被改 / 磁盘满到建不了目录），概率低但一旦发生就是无证据停摆。
+    # 目录建不出来时降级成「没有文件日志」：fh 带 delay=True，构造不碰磁盘，
+    # 首次写失败由 logging.handleError 自吞，stderr/服务本身照常；watchdog 的
+    # quiet 判据反而会报「日志文件缺失」，比「进程直接没了」更容易定位。
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     logger = logging.getLogger(service)
     logger.setLevel(level)
     logger.propagate = False          # 不往 root 冒泡，避免重复输出

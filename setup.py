@@ -349,10 +349,17 @@ def step_config() -> bool:
         except OSError:
             pass
         raise
-    # 回读校验（防写坏）
-    back = json.loads(CONFIG.read_text(encoding="utf-8"))
+    # 回读校验（防写坏）。只接 JSONDecodeError 之外的读失败：tmp.replace 已经
+    # 落盘成功，AV/索引器在这一瞬持着文件句柄时 read_text 会抛 OSError ——
+    # 原实现让它冒到 main 之外，向导在第 2 步直接 traceback 中止、退出码 1，
+    # 而配置其实**已经写好了**，用户照着一次假故障去重跑向导（默认还是覆盖）。
+    try:
+        back = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except OSError as e:
+        warn(f"回读校验被跳过（{type(e).__name__}）：配置已写入，下次 --check 可复核")
+        back = None
     need = ("ai", "ntfy", "vps", "vision", "apps")
-    if any(k not in back for k in need):
+    if back is not None and any(k not in back for k in need):
         fail("配置回读校验失败")
         return False
     if not base_url or not model:

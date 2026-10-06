@@ -538,6 +538,37 @@ def scan_app(key: str, spec: dict) -> tuple[str, dict | None]:
     return "ok", result
 
 
+def _norm_list(value, field: str, app: str) -> list[dict]:
+    """模型输出的 unread/important → 「对象元素 + 字符串字段」的列表。绝不抛。
+
+    三层各自挡住什么（都是实测能触发的形态）：
+      1. 结构错（null / 字符串 / 数字 / 对象）→ 走 ERROR：措辞带「失败」，
+         pclog._ERR_PAT 认得（grep 得到、watchdog 的 link 计数也不会把它当心跳），
+         但**不中断本轮** —— 宁可这一轮按「没读出未读」处理，也不能让一条字段
+         把整轮采集带走（原实现：len(None) TypeError → main 的 per-app except →
+         当轮一条未读都不报，还按「连续 2 轮」推一条假的「采集停摆」）。
+         null 是最常见的形态（模型省字段），与「键缺失」同判为空列表。
+      2. 数组里的非对象元素 → 逐个跳过：一条脏元素不该带走整轮。
+      3. chat/preview/reason 不是字符串（null / 数字 / 数组）→ 收敛成字符串：
+         下游 `b in chat`、`re.search(preview)` 对非串是 TypeError/不迭代，
+         同样是整轮作废，且这两个键是模型最容易即兴改类型的。
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        log(f"[{app}] {field} 字段校验失败({type(value).__name__})，按空列表处理")
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        for k in ("chat", "preview", "reason"):
+            if k in item and not isinstance(item[k], str):
+                item[k] = "" if item[k] is None else str(item[k])
+        out.append(item)
+    return out
+
+
 def handle(result: dict):
     app = result.get("_app", "?")
     label = result.get("_label", app)
@@ -548,8 +579,17 @@ def handle(result: dict):
         log(f"[{app}] apps 声明 ignore，跳过本条")
         return
     ign = set(rules.get("blacklist") or [])
-    unread = result.get("unread", [])
-    important = result.get("important", [])
+    # 模型输出的两个数组必须在**读端**洗型（与 fp_feedback._load_rules、
+    # ai_triager.load_state 的「读端洗、读写两边都不用再防」同一口径）。
+    # 上面 analyze 只校到「是不是对象」，字段这一层一直是漏的：
+    #   unread/important 是 null（模型省字段/退化输出）→ len(None) TypeError；
+    #   是字符串/对象、或数组里混了非对象 → 下面 i.get / u.get AttributeError。
+    # 两种都落在 main 的 per-app try 里变成 cycle error：**当轮采集整轮作废**
+    # （一条未读都不报），且按「连续 2 轮」计数推一条假的「采集停摆」告警
+    # （文案让人去关窗口最小化，方向完全错）。结构错留 ERROR 可 grep，坏元素
+    # 逐个跳过 —— 一条脏元素不该带走整轮。
+    unread = _norm_list(result.get("unread"), "unread", app)
+    important = _norm_list(result.get("important"), "important", app)
     archive({"ts": time.time(), "app": app, "unread": unread,
              "important": important})
     log(f"[{app}] {len(unread)} unread chats, {len(important)} important")
@@ -632,13 +672,19 @@ def main():
             continue
         # P2-9：一口气睡满 30min 时，夜间最后一行（如 07:55）到 08:00 换挡
         # 后的首个心跳之间会隔 600+1800+两段 90s 识别 ≈ 2580s，离 quiet 阈值
-        # 2700s 只剩 2 分钟，AI 稍慢每天早上误报。分段睡：每 300s 一条心跳，
+        # 2700s 只剩 2 分钟，AI 稍慢每天早上误报。分段睡：每 ≤300s 一条心跳，
         # 最大相邻间隔降到 300s + 一轮扫描。步长按最小间隔（含目标级）算。
         slept = 0
-        while slept < POLL_SLEEP_MIN * 60:
-            time.sleep(300)
-            slept += 300
-            log(f"sleep heartbeat: {slept}/{POLL_SLEEP_MIN * 60}s")
+        total = POLL_SLEEP_MIN * 60
+        while slept < total:
+            # 步长取 min(300, 剩余)：目标级 poll_min 配到 1~4 分钟时，固定 300s
+            # 的睡眠量子会把配置承诺的节奏实际抬到 5 分钟（sleep 一睡就是 300s，
+            # 醒来后目标到期判断才发现还没到下一轮）。>=5 分钟时 min 恒等于 300，
+            # 节奏与原来逐字节相同。
+            step = min(300, total - slept)
+            time.sleep(step)
+            slept += step
+            log(f"sleep heartbeat: {slept}/{total}s")
         scanned = 0
         cycle_at = time.time()
         for app, cfg in TARGETS.items():
