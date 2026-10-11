@@ -861,8 +861,19 @@ def _smoke() -> int:
     chk("save_config 空 host 拦截", bad.get("ok") is False, str(bad.get("errors")))
     bad2 = api.save_config({**form, "token": "not-a-token"})
     chk("save_config 坏 token 拦截", bad2.get("ok") is False, str(bad2.get("errors")))
-    at = api.toggle_autostart(True)
-    chk("自启注册幂等", at.get("ok") and at.get("count") == 6, str(at.get("msg")))
+    at = None
+    # 自启注册**会写真实注册表**（HKCU Run）。自检是无窗口诊断，不该改机器状态 ——
+    # 尤其当这台机器上还跑着另一份安装（比如源码树在生产、自启指向源码路径），
+    # 自检把六项改写成自己所在的 exe 形态 = 静默把生产环境的开机自启改了，
+    # 而且下次登录起的是刚被自检覆盖的那份。改成：只读核对，六项齐备就只报通过，
+    # 真缺时才注册（此时注册是正确的补救）。
+    n_have = _autostart_state().get("valid", 0)
+    if n_have == 6:
+        chk("自启 6 项齐备（只读核对）", True, f"{n_have}/6")
+    else:
+        at = api.toggle_autostart(True)
+        chk("自启注册（缺失项已补）", bool(at.get("ok")) and at.get("count") == 6,
+            str(at.get("msg") or f"原 {n_have}/6"))
     for k in ("password", "token", "api_key"):
         r = api.reveal_secret(k)
         chk(f"reveal {k}", r.get("ok") and isinstance(r.get("value"), str),

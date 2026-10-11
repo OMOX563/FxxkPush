@@ -479,8 +479,13 @@ def summary(results: list[tuple[str, bool]]) -> int:
     say("")
     say("后续：")
     say("  1) 手机装 ntfy App，按 VPS 端 setup_vps.sh 打印的信息订阅 fp-phone")
-    say("  2) 想改配置随时编辑 fp.config.json，改完重启：restart_services.bat")
-    say("  3) 自检：.venv\\Scripts\\python.exe setup.py --check")
+    if getattr(sys, "frozen", False):
+        # exe 用户没有 venv 也没有 .bat，给的必须是真能敲的命令
+        say("  2) 想改配置随时编辑 data\\fp.config.json，改完在 GUI 里点「一键启动」重启生效")
+        say("  3) 自检：FxxkPush.exe --role check")
+    else:
+        say("  2) 想改配置随时编辑 fp.config.json，改完重启：restart_services.bat")
+        say("  3) 自检：.venv\\Scripts\\python.exe setup.py --check")
     say("==========================================")
     return 0 if all_ok else 1
 
@@ -491,9 +496,22 @@ def do_check() -> int:
     say(f"项目根: {ROOT}")
     results: list[tuple[str, bool]] = []
 
-    results.append(("项目标记文件", (ROOT / "pc" / "services" / "ai_triager.py").exists()))
-    miss = deps_missing()
-    results.append(("venv + 依赖" + (f"（缺 {','.join(miss)}）" if miss else ""), not miss))
+    # exe（frozen）下两项源码形态的检查语义完全变了，报「缺」是**误导**：
+    #   · 源码树 pc/services/*.py 在 exe 里是编译进包的模块，没有落盘文件；
+    #   · venv + 依赖 —— exe 自带解释器与全部依赖，压根不需要 venv。
+    # 旧版照搬源码口径，装完的 exe 用户每次看到两条 [!!] 会以为安装失败。
+    # exe 下改成「运行形态」检查：解释器已内置 + 界面资源就位。
+    if getattr(sys, "frozen", False):
+        say("  运行形态: 已打包 exe（解释器与依赖已内置，无需 Python/venv）")
+        results.append(("exe 内置解释器 + 依赖", True))
+        gui_html = paths.res_file("gui", "index.html")
+        results.append((f"界面资源 gui/index.html"
+                        + ("" if gui_html.exists() else f"（缺 {gui_html}）"),
+                        gui_html.exists()))
+    else:
+        results.append(("项目标记文件", (ROOT / "pc" / "services" / "ai_triager.py").exists()))
+        miss = deps_missing()
+        results.append(("venv + 依赖" + (f"（缺 {','.join(miss)}）" if miss else ""), not miss))
 
     cfg_ok, detail = False, ""
     try:
