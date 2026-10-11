@@ -36,6 +36,7 @@ import httpx
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
                 str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fpconfig/fp_feedback/alert_fallback
 import paths                                  # 唯一路径真源（PyInstaller 打包前置）
+import procspawn                              # 拉起命令 + 进程识别的唯一分叉点
 HERE = paths.PC_DIR                           # pc/（服务与数据同层，frozen 下自动切）
 LOG_DIR = paths.log_dir()                     # pc/logs（frozen 下 data/logs）
 
@@ -62,7 +63,7 @@ WATCHED = [                # 被监控的 5 个服务（watchdog 不监控自己
     "vision_listener.py",
 ]
 
-PYW = paths.venv_dir() / "Scripts" / "pythonw.exe"   # 和 start_services 同一个
+PYW = paths.venv_dir() / "Scripts" / "pythonw.exe"   # 和 start_services 同一个（非 frozen 用）
 REVIVE_INTERVAL = 300     # 同一服务 5 分钟内只自动拉起一次（防拉起风暴）
 DISK_PCT = 90             # 磁盘使用率告警阈值（VPS 侧同值）
 HB = LOG_DIR / "watchdog.hb"   # 每轮心跳时间戳，给 notification_listener 交叉检查
@@ -180,7 +181,7 @@ def check_health() -> tuple[bool, str]:
 
 
 def _our_pythons() -> list[str]:
-    """本项目的 pythonw 命令行（只认 fuckpush\\pc\\ 下的，不碰 Hermes 的解释器）。
+    """本项目拉起来的进程的命令行（不含 watchdog 自己的 role 判定逻辑）。
 
     为什么不用 PowerShell：watchdog 由 pythonw 启动、自己没有控制台，子进程
     powershell.exe 会新建一个前台窗口，每 60 秒闪一次约两秒。更糟的是
@@ -189,39 +190,33 @@ def _our_pythons() -> list[str]:
 
     process_iter 只取 name：cmdline 要逐个开进程句柄，对全系统几百个进程都取
     一次要 2 秒（还含大量 SYSTEM 进程 AccessDenied）；先按 name 过滤、再只对
-    十几个 pythonw 取 cmdline，约 15ms。实测 15ms vs PowerShell 冷启动 3.5 秒。
+    十几个候选进程取 cmdline，约 15ms。实测 15ms vs PowerShell 冷启动 3.5 秒。
+
+    认人口径（与 start_services 共用 procspawn，两边必须完全一致）：
+      非 frozen  pythonw.exe 且命令行含 ``fuckpush\\pc\\`` 或 ``fuckpush/pc/``
+                —— 反斜杠与正斜杠都认：GUI._our_scripts 一直是两种都匹配，
+                这里只认反斜杠的话，用 `python pc/services/xx.py` 这类正斜杠
+                命令行手动起的服务在 watchdog 眼里会「进程缺失」（误报 +
+                revive 补刀），而 GUI 又说它在跑，两份状态互相打架。
+      frozen     进程名 == exe 文件名 且命令行带已知 ``--role``（exe 自我多路，
+                没有 .py 路径可匹配）。
     """
-    out = []
-    for p in psutil.process_iter(["name"]):
-        try:
-            if (p.info.get("name") or "").lower() != "pythonw.exe":
-                continue
-            cmd = " ".join(p.cmdline() or [])
-            # 反斜杠与正斜杠都认：GUI._our_scripts 一直是两种都匹配，这里只认
-            # `fuckpush\pc\` —— 同一个概念两份口径，用 `python pc/services/xx.py`
-            # 这类正斜杠命令行手动起的服务在 watchdog 眼里会「进程缺失」（误报
-            # + revive 补刀），而 GUI 又说它在跑，两份状态互相打架。
-            low = cmd.lower()
-            if "fuckpush\\pc\\" in low or "fuckpush/pc/" in low:
-                out.append(cmd)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
-    return out
+    return [cmd for _pid, cmd, _role in procspawn.our_procs()]
 
 
 def _counts() -> tuple[dict[str, int], int]:
-    """{脚本名: 进程数}, 5 个被监控服务的枚举总数（**不含 watchdog 自己**）。
+    """{服务脚本名: 进程数}, 5 个被监控服务的枚举总数（**不含 watchdog 自己**）。
 
     r7-1：原来 total 把 watchdog 自身 2 个进程也算进去，revive 的第一道闸
     「total == 0 才可信」永远 >= 2 —— 该闸实际不可达。现在总枚举数只统计
     WATCHED，「连自己都看得见」改由 revive 里单独检查（那是枚举是否被
     权限/AV 挡住的真探针）。
+
+    计数由 procspawn.service_counts 给（两种进程模型共用一份 role 映射），
+    所以 frozen 下这里的键与旧版一样是脚本名，revive/check_procs 的
+    WATCHED 口径不必改。
     """
-    counts: dict[str, int] = {}
-    for cl in _our_pythons():
-        m = re.search(r"([a-z_]+\.py)", cl)
-        if m:
-            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    counts = procspawn.service_counts()
     return counts, sum(counts.get(s, 0) for s in WATCHED)
 
 
@@ -229,16 +224,21 @@ def check_procs() -> tuple[bool, str]:
     # P2-1：判据从「< 2」改成「!= 2」。原来只查缺失 —— 并发双击两份编排
     # 把每个服务起成 4 个进程时（双弹 toast、双次 AI 分诊、手机双推）这里
     # 依然是绿的。上限同样算故障。
+    #
+    # frozen 下判据改为 **1~2**（判据与理由全在 procspawn.expected_range）：
+    # onedir 的 exe 不派生 pythonw 双生层，「恰 2」会把 6 个正常服务全判成
+    # 「进程缺失」，于是每 5 分钟补刀拉出双份，真正变成进程重复；上界留 2
+    # 是为了下一步改成 onefile 时 bootloader 那层不会立刻触发误报。
     counts, _ = _counts()
-    missing = [s for s in WATCHED if counts.get(s, 0) < 2]
-    extra = [s for s in WATCHED if counts.get(s, 0) > 2]
+    missing, extra = procspawn.judge(counts, WATCHED)
+    lo, hi = procspawn.expected_range()
     parts = []
     if missing:
         parts.append(f"进程缺失 {missing}")
     if extra:
         parts.append(f"进程重复 {extra}")
     if parts:
-        return False, "; ".join(parts) + f" (计数={counts})"
+        return False, "; ".join(parts) + f" (计数={counts}, 期望={lo}~{hi})"
     return True, f"{len(WATCHED)} 服务进程齐"
 
 
@@ -269,6 +269,11 @@ def revive_dead(now: float, last_revive: dict) -> None:
        120s 一刀切会把 30min 一轮的 wechat / 事件驱动的 listener 永久判成
        「有动静」= 永远不拉起）。
     同一服务 5 分钟内只重试一次，防止拉起失败变成每轮一次的进程风暴。
+
+    拉起命令与 start_services 共用 procspawn.service_cmd：frozen 下是
+    ``[sys.executable, "--role", <role>]``（exe 自我多路，windowed 无控制台
+    子系统，不弹黑窗），非 frozen 下是 ``[pythonw.exe, pc/services/xx.py]``
+    与原先逐字节一致。
     """
     if time.time() - _START_TS < REVIVE_GRACE:
         return
@@ -285,7 +290,7 @@ def revive_dead(now: float, last_revive: dict) -> None:
         last_revive[svc] = now
         try:
             subprocess.Popen(
-                [str(PYW), str(HERE / "services" / svc)], cwd=str(HERE),
+                procspawn.service_cmd(svc), cwd=str(HERE),
                 creationflags=(getattr(subprocess, "DETACHED_PROCESS", 0)
                                | getattr(subprocess, "CREATE_NO_WINDOW", 0)))
             LOG.warning(f"revive: {svc} 计数 0 且日志静默，已拉起"

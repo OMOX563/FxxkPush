@@ -121,8 +121,13 @@ def _run_ps(cmd: str, timeout: int = 60) -> tuple[int, str]:
             # 会**新建一个控制台窗口** —— GUI 每 2.5s 轮询一次状态，不加此
             # 标志 = 黑窗每 2.5s 弹一次（用户看到的“命令行工具无限重启”）。
             # watchdog 的注释早就写过这个坑（为什么它不用 PowerShell）。
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            # 但 **DETACHED_PROCESS 必须去掉**（实测 2026-10-11）：它让
+            # Get-CimInstance Win32_Process 静默返回空 stdout 且 rc=0 ——
+            # 同一台机器 12 个服务在跑，无标志 12 个、CREATE_NO_WINDOW 12 个、
+            # DETACHED 0 个。rc=0 又让「rc!=0 算枚举失败」那道闸失效，于是
+            # 「一键停止」报「已全部停止」而 12 个照跑，点「一键启动」就是双份。
+            # CREATE_NO_WINDOW 已足够消黑窗（与 uninstall.run_ps 同款修复）。
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return p.returncode, (p.stdout or "")
     except Exception as e:                                      # noqa: BLE001
@@ -144,6 +149,11 @@ def _our_scripts() -> list[str]:
         if rc != 0:
             return []
         return [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if paths.is_frozen():
+        # frozen 下没有 pythonw 也没有 .py 路径：6 个服务是同一个 exe 的
+        # `--role <x>` 进程。仍归一成**脚本名**返回，前端一个字段都不用改。
+        import procspawn
+        return [s for s, _n in sorted(procspawn.service_counts().items()) for _ in range(_n)]
     out: list[str] = []
     for proc in psutil.process_iter(["name"]):
         try:
@@ -244,7 +254,17 @@ def _autostart_state() -> dict:
                 if name in AUTOSTART.values():
                     count += 1
                     parts = value.strip('"').split('" "')
-                    if len(parts) >= 2 and all(Path(p).exists() for p in parts[:2]):
+                    if len(parts) == 1 and "--role " in value:
+                        # frozen 下注册的是 `"<exe>" --role <role>`。注意拆法：
+                        # strip('"') 只吃掉首尾两个引号，`"e" --role x` 拆出来是
+                        # **一段** `'<exe>" --role <role>'` —— 原来的两段式判断在
+                        # 这里恒 False，6 项全被判成「路径不可达」，仪表盘显示
+                        # 「自启 0/6」而其实 6 项都指着一个存在的 exe。按
+                        # 引号切出 exe 路径再判存在。
+                        exe = value.split('"')[1] if '"' in value else parts[0]
+                        if exe and Path(exe).exists():
+                            valid += 1
+                    elif len(parts) >= 2 and all(Path(p).exists() for p in parts[:2]):
                         valid += 1
     except OSError:
         pass
@@ -278,9 +298,38 @@ def _form_from_config() -> dict:
 
 
 # ---------------- 后台任务 ----------------
+# GUI 四个按钮对应的 role → 目标脚本，以及**用哪个解释器**拉起。
+# 解释器这一列不是随意的：改造前「一键启动/窗口归位」走 venv pythonw.exe，
+# 而「自检/卸载」走 sys.executable（python.exe，控制台版 —— 两者把输出重定向
+# 进管道捕获，不需要无窗口语义）。统一成 pythonw 会改掉这两个按钮的既有
+# 行为（异常 traceback 进不了管道），所以这里原样保留这一列。
+_SCRIPT_FOR_ROLE = {
+    "start": ("pc/bootstrap/start_services.py", True),
+    "vision": ("pc/services/vision_listener.py", True),
+    "uninstall": ("uninstall.py", False),
+    "setup": ("setup.py", False),
+}
+
+
+def _fp_launcher(*args: str) -> list[str]:
+    """拉起本项目的另一个功能：frozen 下同一个 exe 自我多路（--role …），
+    非 frozen 下保持改造前的解释器 + .py 路径逐字节不变。
+
+    GUI 的「一键启动/停止/窗口归位/卸载」四个按钮原来全部指向
+    ``.venv\\Scripts\\pythonw.exe <某个 .py>`` —— 打包后两样都不存在，
+    按钮全变成「.venv 不存在，请先跑 setup.bat」，也就是 exe 装上了却一个
+    功能都用不了（用户还得先装 Python + 跑安装向导，整个自带包的意义归零）。
+    """
+    if paths.is_frozen():
+        return [sys.executable, "--role", *args]
+    script, use_venv_py = _SCRIPT_FOR_ROLE[args[0]]
+    exe = str(VENV_PY) if use_venv_py else sys.executable
+    return [exe, str(ROOT / script)] + list(args[1:])
+
+
 def _job_start() -> None:
     _set_job("start", state="running", detail="start_services 执行中")
-    if not VENV_PY.exists():
+    if not paths.is_frozen() and not VENV_PY.exists():
         _set_job("start", state="done", rc=2, detail=".venv 不存在，请先跑 setup.bat")
         return
     log_path = LOG_DIR / "gui_launcher.log"
@@ -288,7 +337,7 @@ def _job_start() -> None:
     try:
         with open(log_path, "a", encoding="utf-8") as lf:
             p = subprocess.Popen(
-                [str(VENV_PY), str(ROOT / "pc" / "bootstrap" / "start_services.py")],
+                _fp_launcher("start"),
                 cwd=str(ROOT), stdout=lf, stderr=subprocess.STDOUT,
                 env=CHILD_ENV,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -302,8 +351,34 @@ def _job_start() -> None:
              detail=tail[-1] if tail else f"exit={rc}")
 
 
+def _kill_ours_frozen() -> int:
+    """frozen 下的「一键停止」：没有 pythonw 可杀，要按 exe 名 + --role 杀。
+
+    PS_KILL 过滤的是 Name='pythonw.exe' 且命令行含 fuckpush\\pc\\，在 exe 形态下
+    **一条也匹配不到** —— 「一键停止」会报「已全部停止」而 6 个服务照跑，
+    紧接着点「一键启动」就是 12 个进程并存（双 toast、双分诊、抢 state）。
+    """
+    import psutil
+    import procspawn
+    procs = procspawn.our_procs()
+    for pid, _cmd, _role in procs:
+        try:
+            psutil.Process(pid).kill()
+        except Exception:                       # noqa: BLE001
+            pass
+    return len(procs)
+
+
 def _job_stop() -> None:
     _set_job("stop", state="running", detail="结束服务进程")
+    if paths.is_frozen():
+        import procspawn
+        n = _kill_ours_frozen()
+        time.sleep(1.5)
+        left = len(procspawn.our_procs())
+        _set_job("stop", state="done", rc=0 if left == 0 else 1,
+                 detail=f"剩余 {left} 个进程" if left else f"已全部停止（{n} 个）")
+        return
     _run_ps(PS_KILL)
     time.sleep(1.5)
     rc2, left = _run_ps(PS_SCRIPTS)
@@ -323,12 +398,12 @@ def _job_stop() -> None:
 
 def _job_move(mode: str) -> None:
     _set_job("move", state="running", detail=f"{mode} 执行中")
-    if not VENV_PY.exists():
+    if not paths.is_frozen() and not VENV_PY.exists():
         _set_job("move", state="done", rc=2, detail=".venv 不存在")
         return
     try:
         p = subprocess.run(
-            [str(VENV_PY), str(ROOT / "pc" / "services" / "vision_listener.py"), mode],
+            _fp_launcher("vision", mode),
             input="\n", capture_output=True, text=True, encoding="utf-8",
             errors="replace", cwd=str(ROOT), timeout=120, env=CHILD_ENV,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -343,7 +418,7 @@ def _job_move(mode: str) -> None:
 
 def _job_uninstall(purge: bool) -> None:
     _set_job("uninstall", state="running", detail="卸载执行中")
-    cmd = [sys.executable, str(ROOT / "uninstall.py"), "--yes"]
+    cmd = _fp_launcher("uninstall", "--yes")
     if purge:
         cmd.append("--purge")
     try:
@@ -361,7 +436,7 @@ def _job_uninstall(purge: bool) -> None:
 def _job_check() -> None:
     _set_job("check", state="running", detail="--check 执行中")
     try:
-        p = subprocess.run([sys.executable, str(ROOT / "setup.py"), "--check"],
+        p = subprocess.run(_fp_launcher("setup", "--check"),
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", cwd=str(ROOT), timeout=120,
                            env=CHILD_ENV,
@@ -625,6 +700,22 @@ class Api:
     def toggle_autostart(self, on: bool) -> dict:
         try:
             if on:
+                if paths.is_frozen():
+                    # frozen 下 6 项自启都要指向同一个 exe + 各自的 role：
+                    # 注册 pythonw + .py 路径在打包后指向两个都不存在的东西，
+                    # 下次登录一条也起不来（GUI 仪表盘却显示「自启 6/6 正常」，
+                    # 因为 _autostart_valid_count 只看注册项在不在）。
+                    import procspawn
+                    entries = {procspawn.SCRIPT_ROLE[s + ".py"]: name
+                               for s, name in AUTOSTART.items()}
+                    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY,
+                                            0, winreg.KEY_SET_VALUE) as key:
+                        for role, name in entries.items():
+                            val = f'"{sys.executable}" --role {role}'
+                            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, val)
+                    st = _autostart_state()
+                    return {"ok": True, "count": st["count"], "autostart": st,
+                            "msg": f"已注册 {st['count']} 项（下次登录生效）"}
                 pyw, pc = str(VENV_PY), str(PC_DIR)
                 if not VENV_PY.exists():
                     return {"ok": False, "msg": ".venv 不存在，先跑 setup.bat"}

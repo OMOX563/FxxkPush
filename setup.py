@@ -41,7 +41,15 @@ CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 def _detect_root() -> Path:
-    """当前目录优先（bat 会 pushd 到项目根），脚本目录回退。"""
+    """当前目录优先（bat 会 pushd 到项目根），脚本目录回退。
+
+    frozen 下（`exe --role setup/check`）：磁盘上没有 pc/services/*.py，这个
+    sys.exit 会让 exe 里的自检在第一行就退出，返回码还是「配置有问题」那种
+    误导性的 1。frozen 取 exe 目录（与 paths.APP_DIR 同口径），非 frozen
+    逻辑一行未动。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     here = Path(__file__).resolve().parent
     for cand in (Path.cwd().resolve(), here):
         if (cand / "pc" / "services" / "ai_triager.py").exists():

@@ -33,6 +33,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 def _detect_root() -> Path:
+    # frozen：exe 目录（与 paths.APP_DIR 同口径），磁盘上没有 pc/services/*.py
+    # —— 原来这个 sys.exit 会让「exe --role uninstall」在分发到的第一行就退出，
+    # 根本走不到 step_purge。
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     here = Path(__file__).resolve().parent
     for cand in (Path.cwd().resolve(), here):
         if (cand / "pc" / "services" / "ai_triager.py").exists():
@@ -73,25 +78,46 @@ _PS_KILL = (
     "Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 )
 
-PURGE_FILES = [
-    "fp.config.json",
-    "pc/logs",                                    # 目录整体
-    "pc/feedback.jsonl",
-    "pc/notifications.jsonl",
-    "pc/toast_echo.jsonl",
-    "pc/triage_log.jsonl",
-    "pc/vision_log.jsonl",
-    "pc/listener_state.json",
-    "pc/triage_state.json",
-    "pc/vision_state.json",
-    "pc/triage_rules.json",
-    # 锁文件的实际位置是 **pc/**：start_services.HERE = parents[1] = pc，
-    # LOCK = HERE / ".start_services.lock"。原来写成 pc/bootstrap/ 是照着
-    # 文件所在目录猜的，那个路径**永远不存在** —— --purge 会报「已清除 N 项」
-    # 却把锁文件留在仓库里（陈旧锁靠 pid 探活自动接管，不致卡死，但清单里
-    # 这条一直是死的）。
-    "pc/.start_services.lock",
+# 运行数据文件名（相对 paths.DATA_DIR）：归档 jsonl / 状态 json / 规则 json / 锁。
+# 锁文件的真实位置就是 DATA_DIR 根（start_services.LOCK = HERE / ".start_services.lock"，
+# HERE = paths.PC_DIR = DATA_DIR）—— 原来写成 pc/bootstrap/ 是照着文件所在目录猜的，
+# 那个路径**永远不存在**，--purge 会报「已清除 N 项」却把锁文件留在原地。
+# frozen 下 DATA_DIR = exe 同级 data/，这批文件与 config/logs 同层，清一处即全清。
+PURGE_NAMES = [
+    "feedback.jsonl",
+    "notifications.jsonl",
+    "toast_echo.jsonl",
+    "triage_log.jsonl",
+    "vision_log.jsonl",
+    "listener_state.json",
+    "triage_state.json",
+    "vision_state.json",
+    "triage_rules.json",
+    ".start_services.lock",
 ]
+
+
+def purge_targets() -> list[Path]:
+    """--purge 要删的路径（由 paths 推导，不再手写相对路径）。
+
+    非 frozen（DATA_DIR = 仓库根 pc/，与改造前逐字节等价）：
+        <仓库根>/fp.config.json      （= paths.config_path()）
+        <仓库根>/pc/logs/            （= paths.log_dir()，目录整体）
+        <仓库根>/pc/*.jsonl|*.json|锁   （= paths.data_file()）
+    frozen（DATA_DIR = exe 同级 data/，即 paths.PC_DIR）：同一份清单落到
+        <exe 目录>/data/…            （= paths.data_file() / paths.log_dir()）
+    原来这张表是手写的仓库相对路径，frozen 下算出来的目标是「exe 旁边的
+    <exe目录>/fp.config.json」与「<exe目录>/pc/logs」—— 恰恰是**打包后一个都
+    不存在**的地方，于是 --purge 打印「无待删除文件」，用户的配置、密钥、
+    归档、状态、日志一个都没删，而界面说的是「已清除」。锁文件那一条曾经
+    写成 pc/bootstrap/ 也是同类错误（真实位置在 pc/）。
+
+    与 paths._LEGACY_FILES 的运行数据口径保持一致（同一批数据，两处名字
+    不同必然漂移）。
+    """
+    out = [paths.config_path(), paths.log_dir()]
+    out += [paths.data_file(n) for n in PURGE_NAMES]
+    return out
 
 
 def say(msg: str = "") -> None:
@@ -120,9 +146,16 @@ def run_ps(cmd: str, timeout: int = 60) -> tuple[int, str]:
             ["powershell", "-NoProfile", "-Command", cmd],
             capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout,
-            # pythonw 父进程下不加此标志 = 每次调用弹一个控制台黑窗
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            # **只给 CREATE_NO_WINDOW，不给 DETACHED_PROCESS**（实测 2026-10-11，
+            # 见下）。pythonw 父进程下不加标志会弹控制台黑窗，那条理由成立；
+            # 但 DETACHED_PROCESS 让 Get-CimInstance Win32_Process **静默返回空
+            # stdout 且 rc=0**：同一台机器上 12 个本项目进程在跑，无标志 12 个、
+            # 只给 CREATE_NO_WINDOW 12 个、给了 DETACHED_PROCESS 0 个。
+            # rc=0 让 step_stop 的「rc!=0 算枚举失败」那道闸也拦不住，于是
+            # 卸载会打印「无运行中的服务进程」直接跳过停服，用户以为服务停了，
+            # 实际 12 个照跑（接着重装就是新旧并存）。正对 r7-12 的教训。
+            # CREATE_NO_WINDOW 已足够消除黑窗，不需要 DETACHED。
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except Exception as e:                                  # noqa: BLE001
@@ -220,15 +253,23 @@ def step_autostart(dry: bool) -> bool:
 def step_unpark(dry: bool) -> bool:
     say("\n== 3/3 聊天窗口拉回屏内 ==")
     vision = ROOT / "pc" / "services" / "vision_listener.py"
-    if not VENV_PY.exists():
-        warn(".venv 不存在，跳过（窗口可能仍在屏外；装回后可运行 "
-             "vision_listener.py unpark）")
-        return True
+    if paths.is_frozen():
+        # frozen 下没有 .venv 也没有这个 .py：同一个 exe 自我多路
+        # （--role vision unpark），无控制台子系统，不弹黑窗。
+        cmd = [sys.executable, "--role", "vision", "unpark"]
+        if not getattr(sys, "frozen", False):     # 理论不可达，留作对照
+            cmd = [str(VENV_PY), str(vision), "unpark"]
+    else:
+        if not VENV_PY.exists():
+            warn(".venv 不存在，跳过（窗口可能仍在屏外；装回后可运行 "
+                 "vision_listener.py unpark）")
+            return True
+        cmd = [str(VENV_PY), str(vision), "unpark"]
     if dry:
-        say(f"  [dry] 将运行: {VENV_PY.name} vision_listener.py unpark")
+        say(f"  [dry] 将运行: {' '.join(cmd)}")
         return True
     try:
-        p = subprocess.run([str(VENV_PY), str(vision), "unpark"],
+        p = subprocess.run(cmd,
                            input="\n", capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
                            cwd=str(ROOT), timeout=120, env=CHILD_ENV)
@@ -248,14 +289,17 @@ def step_unpark(dry: bool) -> bool:
 
 def step_purge(dry: bool) -> bool:
     say("\n== 4/4 清除配置与运行数据（--purge）==")
-    targets = [ROOT / rel for rel in PURGE_FILES]
+    targets = purge_targets()
     existing = [p for p in targets if p.exists()]
     if not existing:
         ok("无待删除文件")
         return True
     if dry:
         for p in existing:
-            say(f"  [dry] 将删除 {p.relative_to(ROOT)}")
+            # 绝对路径：frozen 下 DATA_DIR 在 exe 同级（可能是 %LOCALAPPDATA%
+            # 兜底），不在 ROOT 之下 —— 原来的 p.relative_to(ROOT) 会在这里
+            # 抛 ValueError，把 --dry-run 变成崩溃。
+            say(f"  [dry] 将删除 {p}{'  [目录]' if p.is_dir() else ''}")
         return True
     for p in existing:
         try:

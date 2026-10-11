@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import time
@@ -25,12 +24,13 @@ import psutil
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
                 str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fp_feedback/alert_fallback
 import paths                                  # 唯一路径真源（PyInstaller 打包前置）
+import procspawn                              # 拉起命令 + 进程识别的唯一分叉点
 import pclog
 import fpconfig
 LOG = pclog.get_logger("start_services")
 
 HERE = paths.PC_DIR                           # pc/（服务与数据同层，frozen 下自动切）
-PYW = paths.venv_dir() / "Scripts" / "pythonw.exe"
+PYW = paths.venv_dir() / "Scripts" / "pythonw.exe"   # 仅非 frozen 用；frozen 走 exe 自我多路
 # FP_NTFY_URL 与各服务同口径（README 的「不启隧道直连」模式）：健康门写死
 # 127.0.0.1 的话，那个模式下 4 个服务连的是直连地址、健康门却在等隧道 ——
 # 启动必然中止在「隧道 health 未通过」，文档承诺的模式根本起不来。
@@ -40,15 +40,14 @@ HEALTH_TIMEOUT = 60        # 秒：隧道要多久才算真起不来
 POST_HEALTH_DELAY = 1.5    # health 200 后给隧道一点热身时间
 
 # 顺序就是依赖：隧道必须先通，其余才连得上；watchdog 最后（它监控前面所有）
-ORDER = [
-    "ntfy_tunnel.py",
-    "pc_subscriber.py",
-    "notification_listener.py",
-    "ai_triager.py",
-    "vision_listener.py",
-    "watchdog.py",
-]
+# 键是**脚本名**（frozen 下拉起的是 `exe --role <role>`，procspawn 负责映射，
+# 这里不必、也不该出现第二份 role↔脚本 对照表）。
+ORDER = list(procspawn.SERVICE_SCRIPTS)
+# 每个服务该有几个进程。非 frozen 恰好 2（venv pythonw shim + 真身）；
+# frozen (1,2)：exe 不派生 pythonw 双生层，1 是常态，2 留给 onefile 的
+# bootloader 层，免得下一步改打包方式时 watchdog 立刻误报「进程重复」。
 EXPECT_PER_SCRIPT = 2       # venv pythonw.exe 是 shim，真身另起一个：合法 2 个
+_EXPECT_LO, _EXPECT_HI = procspawn.expected_range()   # frozen 下变成 (1, 2)
 
 
 def _token() -> str:
@@ -59,37 +58,26 @@ _denied = [0]          # cmdline 读不到(AccessDenied) 的进程数（r7-12）
 
 
 def _our_procs(include_self: bool = True) -> list[tuple[int, str]]:
-    """[(pid, cmdline), ...] 本项目的 pythonw（shim + 真身都算）。
+    """[(pid, cmdline), ...] 本项目拉起来的进程（frozen 下 = 同一个 exe 的各
+    --role 子进程；非 frozen = venv pythonw 的 shim + 真身都算）。
 
     psutil 而非 PowerShell：子进程会弹控制台窗口（pythonw 父进程无控制台时），
     且进程内遍历约 15ms，PowerShell 冷启动要 1-5 秒。
-    process_iter 只取 name（便宜），cmdline 单独对 pythonw 取 —— 全量取 cmdline
+    process_iter 只取 name（便宜），cmdline 单独对候选进程取 —— 全量取 cmdline
     是 2 秒级，对全系统几百个进程都开一遍句柄。
+
+    识别与计数的口径全在 procspawn（唯一分叉点）：非 frozen 按
+    ``fuckpush\\pc\\`` 命令行特征认人，frozen 按「进程名 == exe 名 且命令行带
+    已知 --role」认人。这里只做 start_services 特有的那一刀：把编排自己
+    （``start`` role / start_services 脚本）排除在 kill_ours 之外。
     """
     out = []
-    for proc in psutil.process_iter(["name"]):
-        try:
-            if (proc.info.get("name") or "").lower() != "pythonw.exe":
-                continue
-            try:
-                cmd = " ".join(proc.cmdline() or [])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-            low = cmd.lower()
-            # 反斜杠与正斜杠都认（与 watchdog._our_pythons / GUI._our_scripts 同口径）
-            if "fuckpush\\pc\\" not in low and "fuckpush/pc/" not in low:
-                continue          # 只动自己，Hermes 等其它 pythonw 不碰
-            if not include_self and "start_services" in low:
-                continue          # 不杀自己
-            out.append((proc.pid, cmd))
-        except psutil.AccessDenied:
-            # r7-12：单独计数。原来和 NoSuchProcess 混在一起 continue，
-            # 提权会话下 cmdline 读不到 = 活进程被当成不存在，最后误报
-            # 「进程缺失」并 return 1（其实服务好好的）。
-            _denied[0] += 1
-            continue
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-            continue
+    procspawn.reset_denied()
+    for pid, cmd, role in procspawn.our_procs():
+        if not include_self and (role == "start" or "start_services" in cmd.lower()):
+            continue          # 不杀自己
+        out.append((pid, cmd))
+    _denied[0] = procspawn.denied_count()
     return out
 
 
@@ -120,9 +108,18 @@ def list_ours() -> list[str]:
 
 
 def start(script: str) -> None:
-    LOG.info(f"启动 {script}")
-    subprocess.Popen([str(PYW), str(HERE / "services" / script)],
-                     cwd=str(HERE),
+    """拉起一个服务。命令由 procspawn.service_cmd 给出：
+
+    frozen      ``[sys.executable, "--role", <role>]`` —— 同一个 exe 自我多路。
+                windowed（console=False）模式下 exe 没有控制台子系统，子进程
+                不弹黑窗；creationflags 照旧传 DETACHED_PROCESS|CREATE_NO_WINDOW，
+                两者对有无控制台的进程都无害（缺控制台时 Windows 直接忽略）。
+    非 frozen   ``[.venv\\Scripts\\pythonw.exe, pc\\services\\xx.py]``，与改造前
+                逐字节一致。
+    """
+    cmd = procspawn.service_cmd(script)
+    LOG.info(f"启动 {script} -> {' '.join(cmd)}")
+    subprocess.Popen(cmd, cwd=str(HERE),
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
 
 
@@ -166,13 +163,10 @@ def tail(path: Path, n: int = 8) -> str:
 
 
 def verify_procs() -> dict[str, int]:
-    """按脚本名统计进程数；2 = shim + 真身，正常。"""
-    counts: dict[str, int] = {}
-    for cl in list_ours():
-        m = re.search(r"([a-z_]+\.py)", cl)
-        if m:
-            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
-    return counts
+    """按服务统计进程数。非 frozen 期望恰好 2（shim + 真身）；frozen 期望
+    1~2（exe 不双生，2 留给 onefile bootloader）—— 见 procspawn.expected_range。
+    键名仍是脚本名，与 ORDER 一致。"""
+    return procspawn.service_counts()
 
 
 LOCK = HERE / ".start_services.lock"
@@ -255,30 +249,36 @@ def _main() -> int:
     # 4) 进程自检
     time.sleep(3.0)
     counts = verify_procs()
-    bad = {s: c for s, c in counts.items()
-           if s in ORDER and c < EXPECT_PER_SCRIPT}
-    missing = [s for s in ORDER if s not in counts]
+    missing, over = [], []
+    for s in ORDER:
+        c = counts.get(s, 0)
+        if c < _EXPECT_LO:
+            missing.append(s)
+        elif c > _EXPECT_HI:
+            over.append((s, c))
 
-    LOG.info(f"进程统计: {counts}")
+    LOG.info(f"进程统计: {counts}（期望 {_EXPECT_LO}~{_EXPECT_HI} 个/服务）")
     if _denied[0]:
         # 读不到 cmdline 的进程不计入 counts —— 声明出来，否则「缺失」可能是
         # 权限而不是真死（r7-12）
         LOG.warning(f"另有 {_denied[0]} 个进程 cmdline 读不到(AccessDenied)，"
                     f"counts 可能偏低；下方 missing 判断需结合此数看")
         print(f"\n[提示] {_denied[0]} 个进程 cmdline 读不到(权限)，计数可能偏低")
-    if bad or missing:
-        LOG.error(f"异常：缺={missing} 不足={bad}")
+    if missing or over:
+        LOG.error(f"异常：缺={missing} 过多={over}")
         print("\n[警告] 部分服务进程数不对：")
         for s in missing:
             print(f"  - {s}: 没起来")
-        for s, c in bad.items():
-            print(f"  - {s}: 只有 {c} 个（期望 {EXPECT_PER_SCRIPT}）")
+        for s, c in over:
+            print(f"  - {s}: {c} 个（期望 {_EXPECT_LO}~{_EXPECT_HI}，"
+                  f"多半是两份编排并存）")
         print("\n看对应日志: pc/logs/<服务名>.log")
         return 1
 
     total = sum(counts.get(s, 0) for s in ORDER)
     LOG.info(f"全部就绪: {len(ORDER)}/{len(ORDER)} 服务, {total} 个进程")
-    print(f"\n[OK] {len(ORDER)} 个服务全部就绪，共 {total} 个进程（shim+真身）。")
+    print(f"\n[OK] {len(ORDER)} 个服务全部就绪，共 {total} 个进程"
+          f"（{procspawn.expected_text()}）。")
     print(f"     隧道 health=200 | 日志目录: {HERE / 'logs'}")
     return 0
 
