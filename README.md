@@ -1,4 +1,4 @@
-# FxxkPush v0.8.0
+# FxxkPush v0.9.0
 
 自建 AI 消息分诊推送服务：PC 上的 AI 判断"哪些通知值得打扰手机"，重要的经 ntfy 推到手机/手表，垃圾静默归档。
 
@@ -60,9 +60,27 @@ pc/
 │   ├── ntfy_tunnel / pc_subscriber / notification_listener
 │   ├── ai_triager / vision_listener（窗口视觉分诊，清单见 fp.config.json vision 块）/ watchdog
 ├── core/        公共件：pclog（统一日志）/ fp_feedback（反馈闭环）/ alert_fallback（三层降级推送）
+│                / paths（路径抽象层）/ procspawn（拉起与进程识别）/ fpconfig（配置读取器）
 ├── bootstrap/   启动编排与自启注册：start_services.py + install/restart 两个 .bat
 ├── logs/        统一日志（pclog 唯一出口）
 └── *.secret / *.json(l)   运行时配置与数据（不入库）
+```
+
+### 仓库根结构（v0.9 起新增打包相关文件）
+
+```
+仓库根/
+├── launcher.py                 单一多路复用入口：--role 分发到各模块（打包后是唯一 exe 入口）
+├── FxxkPush.spec               PyInstaller 打包配置（onedir、console=False、图标与只读资源）
+├── build_exe.bat               构建脚本：清 dist/build → 调 PyInstaller → 打印体积统计
+├── installer.iss               Inno Setup 7 安装脚本（安装包 + 卸载两档）
+├── fp_console_runtime_hook.py  PyInstaller runtime hook：windowed 模式下补回 stderr 兜底
+├── resources/
+│   └── fxxkpush.ico           应用图标（spec 与 installer.iss 都读它）
+├── GUI.bat / setup.bat / uninstall.bat   源码态入口（exe 用户不需要这三个）
+├── fxxkpush_gui.py + gui/      图形界面本体与前端资源
+├── setup.py / uninstall.py / vps_exec.py  向导 / 卸载 / VPS 命令行助手
+└── pc/ deploy/ docs/           服务与采集器 / VPS 侧 / 审查档案
 ```
 
 ## 消息采集方式
@@ -84,12 +102,119 @@ pc/
 4. AI 调用失败时默认按重要推送（宁滥勿缺）
 5. 附带 30 分钟滑动窗口去重（同类事件只报一次+计数）
 
+## 安装包（推荐）
+
+**从这一版起，PC 端用户机器不需要装 Python。** 编译器把解释器和全部依赖打进了
+exe，下载 → 双击 → 桌面图标，一条路走完。下面这一章是新手主线；后面「上手教程
+（GUI 主线）」是**从源码跑**的等价路径（要改代码、想读日志源码、或在多台机器上
+做定制时才走它）。
+
+### 第 0 步：下载
+
+打开本仓库的 **Releases** 页，下载 `FxxkPush-Setup-<版本号>.exe`（约 22 MB）。
+
+想避开安装、也不要注册表痕迹，就下同一个 Release 里的
+`FxxkPush-<版本号>-windows-x64.zip`（约 25 MB）——两种产物并存、内容同源，
+前者是安装包（自带卸载器），后者是便携版（解压即用）。
+
+### 第 1 步：双击安装 → 启动
+
+1. 双击 `FxxkPush-Setup-<版本号>.exe`，一路「下一步」即可，**不需要管理员权限**
+2. 默认装到 `%LOCALAPPDATA%\Programs\FxxkPush`（当前用户目录），安装向导里
+   可以改
+3. 装完勾选「立即启动 FxxkPush」直接开界面，或之后从快捷方式启动：
+   **开始菜单**「FxxkPush」一定有；**桌面**快捷方式是安装时的可选项（默认不勾，
+   在「附加任务」里勾上才有）
+4. 双击 `FxxkPush.exe`（不带任何参数）= 打开图形界面，行为与源码态的
+   `GUI.bat` 一致
+
+装完的目录长这样（`data/` 首次运行才创建，装完当场就建好让你看得见）：
+
+```
+%LOCALAPPDATA%\Programs\FxxkPush\
+├── FxxkPush.exe        主程序（无黑窗）
+├── _internal\          解释器 + 依赖 + 只读资源（gui/、README.md）
+├── data\               **可写**运行数据：fp.config.json、logs\、状态与归档
+└── unins000.exe        卸载器
+```
+
+### 为什么默认不装进 Program Files
+
+Program Files 默认**不可写**，而 FxxkPush 的配置（含 ntfy token、AI key、VPS 凭据）、
+日志、状态与消息归档都要落在**可写**目录里。硬装进 Program Files 会让首次运行
+建不出 `data/`，只好降级到 `%LOCALAPPDATA%\FxxkPush\data`——配置在 Program
+Files 里、日志在 AppData 里，两处分家，用户永远找不到。装到用户目录则：
+
+- 零提权（`PrivilegesRequired=lowest`，不需要管理员、不弹 UAC）
+- `data/` 就在 exe 旁边，一眼看得见
+- 卸载就是删一个自己完全拥有的目录，不碰别人的东西
+
+**坚持选 Program Files 也不是不能用**：程序会自动把可写数据降级到
+`%LOCALAPPDATA%\FxxkPush\data` 并记一行日志，功能不缺，只是文件分两处。
+
+### 卸载
+
+开始菜单「卸载 FxxkPush」（或控制面板里的同名项）。卸载时会先问你一句
+**是否同时删除配置与历史数据**：
+
+- 选「否」= 默认档：删程序文件、**保留** `data/`（配置、日志、消息历史都在，
+  重装后直接接着用）
+- 选「是」 = 清数据档：连 `data/` 下的配置（**含 API key 与服务器凭据**）、
+  日志与消息历史一并删除，不可撤销
+
+静默卸载（`/VERYSILENT` 等）**不询问**，一律按「保留数据」处理——无人值守场景
+下宁可留数据也不该卡在弹窗上。
+
+卸载器只停/删**指向自己那一份**的进程与开机自启项：同机还跑着源码树（例如你既
+装了 exe 又 clone 了仓库）时，源码树那 12 个服务进程和它自己的自启项不会被误伤。
+
+### 系统要求
+
+| 项 | 要求 |
+|---|---|
+| 操作系统 | Windows 10 / 11，x64 |
+| Python | **不需要**——解释器与全部依赖已内置 |
+| 管理员权限 | **不需要**（用户级安装，无 UAC） |
+| Microsoft Edge WebView2 Runtime | **只有图形界面需要**。Win11 自带；Win10 缺了也能用：启动界面时会在开窗前探测到并弹出安装指引（附官方下载地址），装完无需重启直接再打开即可 |
+
+WebView2 缺失**只影响界面，不影响服务**：命令行一切照常可用，比如
+`FxxkPush.exe --role check`（环境自检）、`FxxkPush.exe --role start`
+（启动全部服务）、`FxxkPush.exe --roles`（列出全部命令）。也就是说这个软依赖
+最坏的结果是「暂时只能用命令行」，不会让你收不到任何推送。
+
+### 装完之后的命令行形态
+
+一个 exe 顶全部：双击 = 图形界面，`--role` 切到别的运行形态。
+
+```powershell
+FxxkPush.exe                      # 打开图形界面（等价 GUI.bat）
+FxxkPush.exe --roles              # 列出全部可用 role（附各 role 指向的文件）
+FxxkPush.exe --role check         # 环境自检（只读，等价 setup.py --check）
+FxxkPush.exe --role start         # 启动全部服务（杀旧 → 起隧道 → 健康门 → 其余）
+FxxkPush.exe --role vision park   # 把清单里的窗口挪到屏幕外
+FxxkPush.exe --role listener --grant-access   # 补做 Windows 通知读取授权
+FxxkPush.exe --role uninstall --purge         # 卸载并清数据（等价 GUI 危险区）
+```
+
+可用 role：`tunnel` / `subscriber` / `listener` / `triager` / `vision` /
+`watchdog`（六个常驻服务）、`start`（启动编排）、`gui`、`setup`、`uninstall`、
+`check`、`vps-exec`。
+
+两处与源码态不同、值得知道的行为：
+
+- **开机自启的形态**是 `"FxxkPush.exe" --role <role>`（6 项，HKCU Run，无需管理员），
+  在 GUI 控制页的「开机自启」开关里写 —— 不是 `pythonw.exe` + `.py` 路径
+- **一个服务只占 1 个进程**（源码态是 2 个：venv 的 `pythonw.exe` 是个跳板，会再
+  派生一个真身解释器）。exe 模式没有那层跳板，任务管理器里 6 个服务就是 6 个进程
+
+> 窗口标题与顶栏徽标上的版本号读的是**打进包里的那份 README 首行**，也就是构建
+> 当下的版本——它标的是「你手上这个 exe 是哪一版」，不会跟着仓库后续更新变。
+
 ## 上手教程（GUI 主线）
 
-> 新手照这一节走完就能收到手机推送：**下载 → VPS 一条命令 → PC 双击 `GUI.bat`
-> → 表单填四项 → 一键启动 → 手机订阅**。首次还要在 PC 上双击一次 `setup.bat`
-> （装依赖 + 通知授权，第 3 步，一次性）；装完日常只用 GUI，命令行与向导全部
-> 降级到文末「附录：无 GUI 环境与排障」。
+> 走的是**源码路线**：需要 Python 3.12+ 或 [uv](https://uv.sh)，装依赖、跑向导
+> 都发生在你自己的机器上。**只想用、不想折腾环境的话，从上一章「安装包」开始**，
+> 那一章才是主线，本章是给要改代码的人准备的等价路径。
 
 ### 第 0 步：前提
 
@@ -98,6 +223,9 @@ pc/
   （`GUI.bat` 按 `python` → `uv` → `python3` 的顺序找解释器）；Win11 自带
   WebView2 Runtime，Win10 缺了就装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
 - 手机能装 ntfy 客户端
+
+> 只想**用**不要改代码的话，上面这两条都不必满足——走上一章的安装包，
+> 用户机器不需要 Python。
 
 ### 第 1 步：下载
 
@@ -175,7 +303,7 @@ systemctl is-active ntfy fuckpush-monitor   # 两个都应是 active
 - 界面三个页签：**仪表盘 / 配置 / 控制**（逐卡说明见下一节「图形化界面（v0.8）」）
 - 控制台跟着 GUI：窗口正常关闭 → 控制台自动关闭；只有启动失败才 `pause` 保留，
   好让你读报错
-- 重复双击会聚焦已开的窗口（单实例），窗口标题 `FxxkPush v0.8.0`（版本号读
+- 重复双击会聚焦已开的窗口（单实例），窗口标题 `FxxkPush v0.9.0`（版本号读
   README 首行 H1）
 - 打不开、提示没找到 Python 或缺 pywebview → 见附录「排障」
 
@@ -358,7 +486,43 @@ curl.exe -H "Authorization: Bearer $((Get-Content fp.config.json -Raw -Encoding 
 端到端 / 视觉 / VPS / 日志四项验证见上文「装完验证一遍」（GUI 版），内容一致；
 通知授权的命令行入口是 `.venv\Scripts\python.exe pc\services\notification_listener.py --grant-access`。
 
-### E. 排障
+### E. 从源码构建 exe
+
+自己出安装包/便携版（三步，全在 Windows 上跑）：
+
+```powershell
+# 1) 装 PyInstaller（先用 setup.bat 建好 .venv，再装进同一个解释器）
+.venv\Scripts\python.exe -m pip install pyinstaller
+
+# 2) 构建：清 dist\ build\ → PyInstaller → 校验 exe → 打印体积
+build_exe.bat
+
+# 3) 打安装包（需另装 Inno Setup 7，ISCC.exe 在其安装目录下）
+ISCC installer.iss
+```
+
+产物：`dist\FxxkPush\`（onedir 目录）→ `dist\FxxkPush-Setup-<版本号>.exe` +
+压成 zip 就是便携版：
+
+```powershell
+powershell -c "Compress-Archive -Path dist\FxxkPush\* -DestinationPath FxxkPush-<版本号>-windows-x64.zip"
+```
+
+要点（都是踩过的坑）：
+
+- **必须 Python 3.12**：`pywinrt` / `pythonnet` 对高版本解释器不友好（3.14 报
+  cannot create instances），换版本构建出来的包在用户机上也是坏的
+- **必须 Inno Setup 7**：`.iss` 里用了 6.x 之后的语法
+- **`installer.iss` 里的 `AppVersion` 要手动改**（当前 `0.9.0`）——它决定产物
+  文件名与安装包属性，忘了改会编出一个名字带旧版本号的包
+- **`console=False` 别改回 `console=True`**：改成控制台子系统后，GUI 启动会弹出
+  一个黑框窗口贴在界面后面；兜底由 `fp_console_runtime_hook.py` 做
+- 改完 `launcher.py` 的 role 表或新增 `pc/` 下的模块，**必须同步改
+  `FxxkPush.spec` 的 hiddenimports** —— 动态 `runpy` 分发扫不到模块名，漏列的
+  role 编译期不报错，用户机上才 `ModuleNotFoundError`
+- 版本号读的是打进包的 README 首行 H1：改版本要改 README，别只改 `AppVersion`
+
+### F. 排障
 
 - **双击 `GUI.bat` 报「未找到可用的 Python3」**：PATH 里既没有可用的 Python 3
   也没有 `uv` —— 装一个（Python 3.12+ 或 [uv](https://uv.sh)）再试。
@@ -380,7 +544,16 @@ curl.exe -H "Authorization: Bearer $((Get-Content fp.config.json -Raw -Encoding 
   `pc\bootstrap\restart_services.bat`。
 - **通知授权过期 / 抓不到 toast**：重跑
   `.venv\Scripts\python.exe pc\services\notification_listener.py --grant-access`
-  （向导第 3 步做的也是这件事）。
+  （向导第 3 步做的也是这件事）。exe 用户用
+  `FxxkPush.exe --role listener --grant-access`
+- **exe 双击后界面一闪就没 / 没反应**：先用命令行确认服务面是不是好的
+  ——`FxxkPush.exe --role check` 能跑通就说明是界面层的问题，多半是 WebView2
+  缺失（会在开窗前弹指引）；想看真实报错就
+  `FxxkPush.exe --role gui`，`fp_console_runtime_hook.py` 会把 stderr 兜住
+- **exe 报「role xxx 的目标文件不存在」**：包漏模块了（多半是 `FxxkPush.spec` 的
+  hiddenimports 没跟着新模块改），按上一节重建
+- **Program Files 下装了、找不到配置**：可写数据自动降级到了
+  `%LOCALAPPDATA%\FxxkPush\data`，去那儿找（`data\` 建不出来时会有一行日志提示）
 
 ## 组件
 
@@ -403,6 +576,14 @@ curl.exe -H "Authorization: Bearer $((Get-Content fp.config.json -Raw -Encoding 
 | `vps_exec.py` | PC | SSH 执行助手：跑命令 / `--put` 上传（临时文件+原子替换，断线不会截断目标）/ `--get` |
 | `fxxkpush_gui.py` + `gui/` | PC | 图形化控制台（pywebview 液态玻璃 UI）：仪表盘 / 配置合并写入 / 启停 / 自启开关 / 窗口归位 / 一键卸载 |
 | `GUI.bat` | PC | GUI 入口：带控制台（可看输出 / 跑 `--smoke` 自检），**关闭 GUI 后控制台自动关闭**、仅失败时暂停；要求 `.venv` 已装依赖 |
+| `launcher.py` | PC | **单一多路复用入口**：按 `--role` 分发到各模块（frozen 与源码两种形态共用一个入口）。双击无参数 = GUI；`--roles` 列出全部 role。打包后它是唯一 exe 入口 |
+| `pc/core/paths.py` | PC | 路径抽象层（全项目唯一真源）：`APP_DIR` 程序目录 / `RES_DIR` 只读资源 / `DATA_DIR` 可写数据三件正交。frozen 下可写数据落 exe 同级 `data/`，建不出来（Program Files 无写权限）降级 `%LOCALAPPDATA%\FxxkPush\data`；非 frozen 下与改造前逐字节等价 |
+| `pc/core/procspawn.py` | PC | 进程拉起与识别的**唯一分叉点**：frozen 下服务是 `[exe --role x]`（一个 role 恒 1 个进程），非 frozen 是 `pythonw.exe + .py`（每服务 2 个进程）。start_services 与 watchdog 共用它，否则两边口径不一致会让 watchdog 恒报「进程缺失」并反复补刀 |
+| `FxxkPush.spec` | 构建期 | PyInstaller onedir 配置：`console=False`（无黑窗）、应用图标、`gui/` 与 `README.md` 落进只读 `RES/`；因 `runpy.run_module` 动态分发扫不到模块名 + `pc/` 是命名空间包，12 个模块在 hiddenimports 里逐个显式列出，漏一个那个 role 在用户机上就 `ModuleNotFoundError` |
+| `build_exe.bat` | 构建期 | 构建脚本：清 `dist\` `build\` → 调 PyInstaller → 校验 exe 存在 → 打印 exe / `_internal` / 合计体积与占比（GBK + CRLF，只删自己的产物目录） |
+| `installer.iss` | 构建期 | Inno Setup 7 安装脚本：默认装用户目录（不用管理员）、桌面快捷方式为可选项、装完建 `data\`、卸载先跑 `--role uninstall --yes` 再按选择清 `data\`。自启项不由它管（GUI 开关写），卸载时只确保它们消失 |
+| `fp_console_runtime_hook.py` | 构建期 | PyInstaller runtime hook：`console=False`（GUI 子系统）下异常既没 stdout 也没 traceback，用户只看到「双击闪退」；本 hook 在解释器启动最早期挂上 stderr 兜底，让崩溃能留痕。刻意零业务依赖 |
+| `resources/fxxkpush.ico` | 构建期 | 应用图标（`.ico` 必须入库，`.gitignore` 对它开了例外），`FxxkPush.spec` 与 `installer.iss` 都读它 |
 
 ## 误判反馈闭环怎么干预
 
@@ -524,8 +705,10 @@ GUI 保存后的「一键启动（重启生效）」按钮，或命令行
 - [x] v0.6.0：单一配置重构（仓库根 fp.config.json + pc/core/fpconfig.py 读取器，11 个消费方迁移、四份旧配置删除）+ vision 配置驱动（process/class/title 三层匹配与 settings 运行参数块）+ 自定义软件接入（apps 声明式分诊规则，闸门与视觉双通道消费）+ 发布脱敏与 README 基于 ntfy 声明
 - [x] v0.7.0：一键上手与稳定性加固 —— 注册自启动单文件（按当前目录探测项目根）+ 双侧一键（VPS `deploy/setup_vps.sh`、PC `setup.bat`/`setup.py` 向导与 `--check`）+ 一键卸载（`uninstall.bat`：停服务 / 摘自启 / 窗口归位，数据默认保留，`--purge` 全清）+ 取消 QQ 视觉适配（QQ 归 toast 主通道，消除最小化误报）+ 运行测试与全链路审查共 20 处修复（P0 SSH 兜底鉴权、硬规则入重发队列、配置 mtime 热加载、非 200 留 ERROR 等）
 - [x] v0.8.0：图形化界面（GUI）—— pywebview + 液态玻璃控制台：仪表盘（服务/隧道/自启/看门狗/启动日志）、配置表单合并写入 fp.config（密钥留空保持）、一键启动/停止、自启开关、窗口归位、一键卸载（可选清数据）
-- [ ] v0.9.0：视觉截图瘦身与留档 —— 企微全尺寸截图（1233×813 ≈ 132KB/张，微信 544×519 ≈ 45KB）识别前降采样，降低上传体积与识别成本；截图落盘并滚动保留 24 小时，清理时机 = 重新开机时 + 每日凌晨
+- [x] v0.8.1：五轮全量代码审查（114 项发现 / 91 项修复，P0 清零）+ 教程面向 GUI 重写 —— R1 修 28 处（`fail`/`os` 未定义 NameError、GDI/SFTP 句柄泄漏、SFTP 心跳可击穿监控、临时文件双写、空 token 假告警）、R2 修 25 处（GUI 整读 4MB 日志、AI 与 vision 导入期配置快照不自愈、同步 HTTP 阻塞事件循环、trace 泄漏、全断流行两条判据都不认）、R3 修 21 处（`_ai()` 静默返回空导致启动即死 R2 回归）、R4 修 10 处（fp-phone 非 200 零日志、固定临时名 + 固定名并发写坏唯一配置源、各服务补 excepthook）、R5 修 7 处（vision 模型字段非列表导致整轮作废、pclog 建不出目录在 excepthook 之前打死六个服务、GUI 从零写入缺三块配置）
+- [x] v0.9.0：可执行 exe 分发版 —— **用户机器不再需要装 Python**。路径抽象层 `pc/core/paths.py`（APP_DIR/RES_DIR/DATA_DIR 三维正交，可写数据落 exe 同级 `data/`，Program Files 无写权限时降级 `%LOCALAPPDATA%`）+ 单一多路复用入口 `launcher.py --role`（12 个 role，frozen 与源码共用一个入口，双击 exe 默认开 GUI）+ 进程分叉点 `pc/core/procspawn.py`（exe 模式一个服务 1 个进程，自启项形态变为 `"FxxkPush.exe" --role x`）+ PyInstaller 6 onedir 打包（`FxxkPush.spec` / `build_exe.bat`，`console=False` 无黑窗、应用图标、runtime hook 兜 stderr）+ Inno Setup 7 安装包（`installer.iss`，用户级安装零提权、桌面快捷方式可选、卸载分「保留数据/清数据」两档、只停删自己那份进程与自启项）+ GUI 开窗前探测 WebView2 缺失并给安装指引与命令行降级路径
 - [ ] 钉钉 / 学习通等更多 App 深度适配
+- [ ] 视觉截图瘦身与留档（未发版，原排在 v0.9.0 位置，被 exe 分发版占号后顺延）—— 企微全尺寸截图（1233×813 ≈ 132KB/张，微信 544×519 ≈ 45KB）识别前降采样，降低上传体积与识别成本；截图落盘并滚动保留 24 小时，清理时机 = 重新开机时 + 每日凌晨
 - [ ] 每日日报（AI 汇总当天事件/误判，22:00 推手机；`fp_feedback.stats()` 已备好误判统计）
 - [ ] 误判样本 → 27B 模型微调（语料已在 `pc/feedback.jsonl` 自包含落地，缺训练流程）
 - [ ] 反馈的「该推没推」信号（当前只有👎 能点，被静默的消息手机上没有按钮）
