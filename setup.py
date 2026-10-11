@@ -209,6 +209,13 @@ def deps_missing() -> list[str]:
 
 def step_deps() -> bool:
     say("\n== 1/7 虚拟环境与依赖 ==")
+    # exe（frozen）下这一步整步作废：解释器与全部依赖已打包在 _internal 里，
+    # 磁盘上没有也不该有 venv。照跑会去 <exe 目录>/.venv 找解释器 → 装 7 个
+    # 依赖进一份没 Python 的机器（白占几百 MB，且 uv/系统 Python 大概率也没有），
+    # 最后必然 fail，让用户以为安装坏了。这里直接跳过并说清「内置」。
+    if getattr(sys, "frozen", False):
+        ok("exe 已内置解释器与全部依赖（无需 Python / venv，跳过）")
+        return True
     miss = deps_missing()
     if not miss:
         ok(f".venv 就绪，依赖齐全（{len(DEPS)} 项）")
