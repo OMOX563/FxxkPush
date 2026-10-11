@@ -644,6 +644,58 @@ except ImportError as e:                                        # pragma: no cov
     sys.exit(2)
 
 
+def _webview2_present() -> bool:
+    """WebView2 Runtime 是否已安装。
+
+    pywebview 自己**不检测**这件事：它只 `clr.AddReference` 加载 .NET 的
+    Microsoft.Web.WebView2.Core.dll，然后 `WebView2()`，缺失时由 .NET 层抛
+    一个我们无法稳定 catch 的异常（类型随 pythonnet 版本变），而 create_window
+    之后的失败路径在 windowed 模式下既没 stdout 也没 traceback —— 用户只看到
+    「双击闪退」。所以在开窗**之前**主动探测，缺失就走友好提示。
+
+    双路探测（任一命中即认为已装）：
+      1. 注册表 EdgeUpdate Clients 的 pv 版本号（WOW6432Node / 本机 / 当前用户）；
+      2. 文件系统 `Microsoft/EdgeWebView/Application/*/msedgewebview2.exe`。
+    探测本身全 try 包住：任何异常一律按「可能缺失」处理，最坏是弹一次
+    多余的安装提示，绝不因此把 GUI 打死。
+    """
+    import glob
+    try:
+        import winreg
+        key = r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+        alt = r"SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+        for hive, path in ((winreg.HKEY_LOCAL_MACHINE, key),
+                           (winreg.HKEY_LOCAL_MACHINE, alt),
+                           (winreg.HKEY_CURRENT_USER, alt)):
+            try:
+                k = winreg.OpenKey(hive, path)
+                if winreg.QueryValueEx(k, "pv")[0]:
+                    return True
+            except OSError:
+                continue
+    except Exception:                                            # noqa: BLE001
+        pass
+    try:
+        for pat in (r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe",
+                    r"C:\Program Files\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe"):
+            if glob.glob(pat):
+                return True
+    except Exception:                                            # noqa: BLE001
+        pass
+    return False
+
+
+WEBVIEW2_MISSING_HINT = (
+    "缺少 Microsoft Edge WebView2 Runtime —— FxxkPush 的界面需要它来渲染。\n\n"
+    "请安装后重试：\n"
+    "https://developer.microsoft.com/microsoft-edge/webview2/\n\n"
+    "（安装包约 130MB，装完无需重启直接再打开 FxxkPush 即可。）\n\n"
+    "不装也能用：命令行模式照常可用，例如\n"
+    "    FxxkPush.exe --role check      环境自检\n"
+    "    FxxkPush.exe --role start      启动全部服务\n"
+    "    FxxkPush.exe --roles           查看全部命令")
+
+
 class Api:
     def get_status(self) -> dict:
         scripts: dict[str, int] = {}
@@ -793,8 +845,18 @@ def _smoke() -> int:
     chk("status 实值", st["version"].count(".") == 2
         and st["autostart"]["expected"] == 6, f"v={st['version']}")
     form = st["form"]
-    r = api.save_config(form)          # 原样回写 → 应无变化
-    chk("save_config 往返无变化", r.get("ok") and r.get("changed") == [], str(r)[:80])
+    # 往返断言只在「已有完整配置」的环境成立：全新安装目录没有 fp.config.json
+    # 时 form 各项为空，此时 save_config 返回「VPS 地址不能为空」是**正确行为**
+    # （校验在起作用），拿它当「往返失败」判红会让新装用户第一次跑 --smoke 就
+    # 看到一条假故障。空配置下改验「校验确实拦住了空表单」。
+    has_config = bool((form.get("host") or "").strip())
+    if has_config:
+        r = api.save_config(form)          # 原样回写 → 应无变化
+        chk("save_config 往返无变化", r.get("ok") and r.get("changed") == [], str(r)[:80])
+    else:
+        r = api.save_config(form)
+        chk("save_config 空表单拦截（未配置环境）",
+            r.get("ok") is False and bool(r.get("errors")), str(r.get("errors"))[:80])
     bad = api.save_config({**form, "host": ""})
     chk("save_config 空 host 拦截", bad.get("ok") is False, str(bad.get("errors")))
     bad2 = api.save_config({**form, "token": "not-a-token"})
@@ -810,7 +872,9 @@ def _smoke() -> int:
     if fails:
         print(f"\n{len(fails)} 项失败")
         return 1
-    print("\n无窗口自检 6/6 PASS（接下来真开窗验证 UI）")
+    # 项数随环境走（有配置时 9 项、空配置时仍 9 项——往返/空表单二选一，
+    # 但文案不同），所以这里不写死数字，只报「全通过」。
+    print("\n无窗口自检全部 PASS（接下来真开窗验证 UI）")
     return 0
 
 
@@ -870,6 +934,13 @@ def main() -> int:
     elif not GUI_HTML.exists():
         _fatal(f"缺少 {GUI_HTML}")
         return 2
+
+    # 开窗之前主动探测 WebView2：缺失时 .NET 层抛的异常在 windowed 模式下
+    # 既没 stdout 也没 traceback，用户只看到「双击闪退」。这里提前拦下并给
+    # 出安装指引 + 命令行降级路径（--smoke 是无窗口自检，不受影响）。
+    if not _webview2_present():
+        _fatal(WEBVIEW2_MISSING_HINT)
+        return 3
 
     api = Api()
     try:
