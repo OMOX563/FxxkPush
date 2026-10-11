@@ -160,8 +160,15 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     app = app_dir()
 
+    # **无参数 = 打开图形界面**（不是打印用法）。
+    # 源码版的入口是 GUI.bat，帮你补上了 `--role gui`，所以「双击 = 开面板」
+    # 那个直觉在源码态是成立的；打包后 exe 就是这个入口，没有 .bat 帮补参数，
+    # 再让无参数走「打印用法 + rc=2」就变成了：双击 → windowed 下用法输出进
+    # 新开的控制台 → 窗口一闪就没 → 用户以为程序坏了（实测真被当成打不开）。
+    # 所有 CLI 角色本来都有显式 --role，把默认值给 gui 零损失。
     if not argv:
-        return usage_error("缺少 --role", app)
+        argv = ["--role", "gui"]
+
     if argv[0] in ("-h", "--help", "help"):
         print_roles(app)
         return 0
