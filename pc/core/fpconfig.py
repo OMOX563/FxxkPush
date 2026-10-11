@@ -25,8 +25,9 @@ import os
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]      # pc/core/fpconfig.py → 仓库根
-PATH = ROOT / "fp.config.json"
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
+ROOT = paths.APP_DIR                          # 仓库根（frozen 下 = exe 目录）
+PATH = paths.config_path()                    # fp.config.json（非 frozen = 仓库根，冻结后 = data/）
 
 _cache: tuple | None = None   # (mtime_ns, data)；None = 未缓存（缺失/坏文件）
 _tok = ""

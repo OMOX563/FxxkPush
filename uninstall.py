@@ -42,8 +42,10 @@ def _detect_root() -> Path:
 
 
 ROOT = _detect_root()
+sys.path.insert(0, str(ROOT / "pc" / "core"))
+import paths  # noqa: E402   唯一路径真源（PyInstaller 打包前置）
 # pythonw：unpark 子进程与自启语义都要无窗口（python.exe 会弹控制台）
-VENV_PY = ROOT / ".venv" / "Scripts" / "pythonw.exe"
+VENV_PY = paths.venv_dir() / "Scripts" / "pythonw.exe"
 # 子进程 stdout 重定向到管道时按 locale(cp936) 写中文，而本进程按 utf-8 解码 ——
 # unpark 的归位结果在卸载输出里全是乱码。只改子进程 stdio 编码，不动其它行为。
 CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}

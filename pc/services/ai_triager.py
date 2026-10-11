@@ -28,10 +28,11 @@ import httpx
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
                 str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fp_feedback/alert_fallback
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
 import pclog
 import fp_feedback
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
+HERE = paths.PC_DIR                           # pc/（服务与数据同层，frozen 下自动切）
 # 配置改由共享读取器提供（fp.config.json 单一来源）：缺文件/坏块/非对象
 # 都由 fpconfig 降级成带默认值的 dict —— 原来这里手写的「try + isinstance +
 # setdefault」三道防线就是为导入期无声退出准备的，现在收敛到 fpconfig 一处。

@@ -27,12 +27,12 @@ from __future__ import annotations
 import json
 import os
 import time
-from pathlib import Path
 
 import pclog
 import fpconfig
+import paths                                     # 唯一路径真源（PyInstaller 打包前置）
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/core/）
+HERE = paths.PC_DIR                              # pc/（服务与数据同层）
 # r7-7：**惰性**创建 handler。原来模块顶层 get_logger —— ai_triager 顶层
 # `import fp_feedback` 会连带在它进程里挂上 fp_feedback.log 的
 # RotatingFileHandler，于是「常驻 triager」和「手跑 CLI」各持一个句柄写同一

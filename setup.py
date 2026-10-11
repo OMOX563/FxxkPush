@@ -53,12 +53,13 @@ def _detect_root() -> Path:
 ROOT = _detect_root()
 VENV = ROOT / ".venv"
 VPY = VENV / "Scripts" / "python.exe"
-CONFIG = ROOT / "fp.config.json"
 # 读配置走全仓唯一的 fpconfig —— 与六个服务、GUI 同一口径（支持 fp.config.json
 # 的 // 行注释）。setup 自身仍是纯标准库：fpconfig 只 import json/os/re/pathlib，
 # 且 _detect_root 已经确认过仓库结构（pc/services/ai_triager.py 在）。
 sys.path.insert(0, str(ROOT / "pc" / "core"))
+import paths  # noqa: E402   唯一路径真源（PyInstaller 打包前置）
 import fpconfig  # noqa: E402
+CONFIG = fpconfig.PATH              # fp.config.json（非 frozen = 仓库根，与改造前同值）
 # 健康端点与各服务同口径（FP_NTFY_URL 的「不启隧道直连」模式，见 README）——
 # 写死 127.0.0.1 会让那个模式下向导的健康验证恒失败。
 NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")

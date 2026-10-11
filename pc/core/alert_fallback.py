@@ -21,12 +21,12 @@ import os
 import shlex
 import subprocess
 import time
-from pathlib import Path
 
 import pclog
 import fpconfig
+import paths                                     # 唯一路径真源（PyInstaller 打包前置）
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/core/）
+HERE = paths.PC_DIR                              # pc/（服务与数据同层）
 ECHO_FILE = HERE / "toast_echo.jsonl"
 
 

@@ -22,8 +22,15 @@ from pathlib import Path
 import httpx
 import psutil
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/bootstrap/）
-PYW = HERE.parent / ".venv" / "Scripts" / "pythonw.exe"
+sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
+                str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fp_feedback/alert_fallback
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
+import pclog
+import fpconfig
+LOG = pclog.get_logger("start_services")
+
+HERE = paths.PC_DIR                           # pc/（服务与数据同层，frozen 下自动切）
+PYW = paths.venv_dir() / "Scripts" / "pythonw.exe"
 # FP_NTFY_URL 与各服务同口径（README 的「不启隧道直连」模式）：健康门写死
 # 127.0.0.1 的话，那个模式下 4 个服务连的是直连地址、健康门却在等隧道 ——
 # 启动必然中止在「隧道 health 未通过」，文档承诺的模式根本起不来。
@@ -31,12 +38,6 @@ NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
 HEALTH_URL = f"{NTFY_BASE}/v1/health"
 HEALTH_TIMEOUT = 60        # 秒：隧道要多久才算真起不来
 POST_HEALTH_DELAY = 1.5    # health 200 后给隧道一点热身时间
-
-sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
-                str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fp_feedback/alert_fallback
-import pclog
-import fpconfig
-LOG = pclog.get_logger("start_services")
 
 # 顺序就是依赖：隧道必须先通，其余才连得上；watchdog 最后（它监控前面所有）
 ORDER = [

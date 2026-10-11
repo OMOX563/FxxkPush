@@ -22,6 +22,7 @@ TOPICS = ["fp-vps", "fp-gray"]  # VPS hard alerts + gray-zone events
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
                 str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fpconfig/fp_feedback/alert_fallback
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
 import pclog
 import fpconfig
 LOG = pclog.get_logger("pc_subscriber")
@@ -74,7 +75,7 @@ def _auth() -> dict:
 # ---------- toast ----------
 # （R2：原来的 _toaster/get_toaster 惰性工厂全仓库零调用点 —— toast() 里
 #  每次都直接 from winotify import，这个「缓存 import 结果」的半成品是死代码。）
-ECHO = Path(__file__).resolve().parents[1] / "toast_echo.jsonl"
+ECHO = paths.PC_DIR / "toast_echo.jsonl"
 
 
 def record_echo(title, message):

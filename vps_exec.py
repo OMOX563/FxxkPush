@@ -19,6 +19,7 @@ import paramiko
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "pc" / "core"))
+import paths
 import fpconfig
 
 

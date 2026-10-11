@@ -48,13 +48,18 @@ def _detect_root() -> Path:
 
 ROOT = _detect_root()
 sys.path.insert(0, str(ROOT / "pc" / "core"))
+import paths  # noqa: E402   唯一路径真源（PyInstaller 打包前置）
 import fpconfig  # noqa: E402
 import pclog  # noqa: E402   # 只用 read_tail（不 get_logger，GUI 不该持有任何服务的日志句柄）
 
 # pythonw 而非 python.exe：python.exe 是控制台程序 —— 自启注册成它
 # 会在登录时弹 6 个黑窗；pythonw 无窗口子系统，双击 GUI 也绝不带控制台。
-VENV_PY = ROOT / ".venv" / "Scripts" / "pythonw.exe"
-GUI_HTML = ROOT / "gui" / "index.html"
+VENV_PY = paths.venv_dir() / "Scripts" / "pythonw.exe"
+GUI_HTML = paths.res_file("gui", "index.html")   # frozen 下走 _MEIPASS/RES
+LOG_DIR = paths.log_dir()                        # pc/logs（frozen 下 data/logs）
+# 源码树布局（仅非 frozen 存在）：服务脚本 / bootstrap / 代码根。frozen 下
+# 这些 .py 已被打进 exe，外壳自己拉起子进程，此处只保留 ROOT 供 GUI 展示。
+PC_DIR = paths.PC_DIR
 # 健康端点与 4 个服务同口径（README 的「不启隧道、FP_NTFY_URL 直连」模式）：
 # 写死 127.0.0.1 的话，那个模式下仪表盘 health 恒红、start 也过不了健康门。
 NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
@@ -197,7 +202,7 @@ def _read_version() -> str:
     # 立刻生效，与 fpconfig.raw() 的「mtime 变了重读」同口径；读失败不缓存
     # （AV 抖动不该把版本号钉死成 "?"）。
     global _ver_cache
-    p = ROOT / "README.md"
+    p = paths.res_file("README.md")   # frozen 下随包，源码树里才是 ROOT/README.md
     try:
         mtime = p.stat().st_mtime_ns
     except OSError:
@@ -278,7 +283,7 @@ def _job_start() -> None:
     if not VENV_PY.exists():
         _set_job("start", state="done", rc=2, detail=".venv 不存在，请先跑 setup.bat")
         return
-    log_path = ROOT / "pc" / "logs" / "gui_launcher.log"
+    log_path = LOG_DIR / "gui_launcher.log"
     _cap_log(log_path)
     try:
         with open(log_path, "a", encoding="utf-8") as lf:
@@ -292,7 +297,7 @@ def _job_start() -> None:
     except Exception as e:                                      # noqa: BLE001
         _set_job("start", state="done", rc=1, detail=f"{type(e).__name__}: {e}")
         return
-    tail = _tail(ROOT / "pc" / "logs" / "start_services.log", 3)
+    tail = _tail(LOG_DIR / "start_services.log", 3)
     _set_job("start", state="done", rc=rc,
              detail=tail[-1] if tail else f"exit={rc}")
 
@@ -535,7 +540,7 @@ def _fatal(msg: str) -> None:
     """无控制台场景（pythonw / 输出重定向）下 stdout 不可见：落日志 + 系统弹窗。"""
     print(msg)
     try:
-        log = ROOT / "pc" / "logs" / "gui_launcher.log"
+        log = LOG_DIR / "gui_launcher.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%dT%H:%M:%S')}] GUI FATAL: {msg}\n")
@@ -562,7 +567,7 @@ class Api:
         for s in _our_scripts():
             scripts[s] = scripts.get(s, 0) + 1
         hcode, htext = _health()
-        wd_tail = _tail(ROOT / "pc" / "logs" / "watchdog.log", 1)
+        wd_tail = _tail(LOG_DIR / "watchdog.log", 1)
         cfg = fpconfig.raw() or {}          # 只读 + 2.5s 轮询：走 mtime 缓存
         vision_keys = [k for k in ((cfg.get("vision") or {})) if k != "settings"]
         return {
@@ -572,14 +577,14 @@ class Api:
             "health": {"code": hcode, "text": htext},
             "autostart": _autostart_state(),
             "watchdog_last": wd_tail[-1] if wd_tail else "",
-            "start_log": _tail(ROOT / "pc" / "logs" / "start_services.log", 10),
+            "start_log": _tail(LOG_DIR / "start_services.log", 10),
             "version": _read_version(),
             "config_exists": fpconfig.PATH.exists(),
             "vision_targets": vision_keys,
             "form": _form_from_config(),
             "jobs": {k: _get_job(k) for k in
                      ("start", "stop", "move", "uninstall", "check")},
-            "paths": {"root": str(ROOT), "logs": str(ROOT / "pc" / "logs")},
+            "paths": {"root": str(ROOT), "logs": str(LOG_DIR)},
         }
 
     def reveal_secret(self, kind: str) -> dict:
@@ -620,7 +625,7 @@ class Api:
     def toggle_autostart(self, on: bool) -> dict:
         try:
             if on:
-                pyw, pc = str(VENV_PY), str(ROOT / "pc")
+                pyw, pc = str(VENV_PY), str(PC_DIR)
                 if not VENV_PY.exists():
                     return {"ok": False, "msg": ".venv 不存在，先跑 setup.bat"}
                 with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY,
@@ -660,7 +665,7 @@ class Api:
         return _spawn("check", _job_check)
 
     def open_dir(self, which: str) -> dict:
-        target = {"logs": ROOT / "pc" / "logs",
+        target = {"logs": LOG_DIR,
                   "root": ROOT}.get(which)
         if not target:
             return {"ok": False, "msg": "非法参数"}

@@ -39,7 +39,10 @@ from pathlib import Path
 import httpx
 import psutil
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
+sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
+                str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fpconfig/fp_feedback/alert_fallback
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
+HERE = paths.PC_DIR                           # pc/（服务与数据同层，frozen 下自动切）
 NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")  # via SSH tunnel (see pc/services/ntfy_tunnel.py)
 
 sys.path[:0] = [str(HERE),                    # pc/

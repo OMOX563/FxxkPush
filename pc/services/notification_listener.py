@@ -28,6 +28,7 @@ from winrt.windows.ui.notifications.management import (
 NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")  # via SSH tunnel (see pc/ntfy_tunnel.py)
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
                 str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fpconfig/fp_feedback/alert_fallback
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
 import fpconfig
 # 取 token：FP_NTFY_TOKEN 优先、文件取到非空才缓存、失败下次重读。原先
 # 包 try 是防导入期无声退出（AV 在 exists/read 之间独占）—— 该保证现在
@@ -35,8 +36,9 @@ import fpconfig
 NTFY_TOKEN = fpconfig.ntfy_token()
 TOPIC = "fp-pc"
 POLL_SEC = 3
-ARCHIVE = Path(__file__).resolve().parents[1] / "notifications.jsonl"  # pc/
-STATE = Path(__file__).resolve().parents[1] / "listener_state.json"  # pc/
+PC_DIR = paths.PC_DIR                         # pc/（服务与数据同层，frozen 下自动切）
+ARCHIVE = PC_DIR / "notifications.jsonl"
+STATE = PC_DIR / "listener_state.json"
 
 # apps worth watching; everything else is captured but flagged unknown
 WATCHLIST = {"QQ", "微信", "WeChat", "钉钉", "DingTalk", "TIM", "学习通",
@@ -52,7 +54,7 @@ SELF_MARKERS = {"fuckpush", "fxxkpush", "winotify", "python", "pythonw"}
 # pc_subscriber writes every toast it pops to this file; Windows hands the same
 # toast back to us as a notification a moment later (app name resolves to "?"),
 # so match on content instead of app identity.
-ECHO_FILE = Path(__file__).resolve().parents[1] / "toast_echo.jsonl"
+ECHO_FILE = PC_DIR / "toast_echo.jsonl"
 ECHO_WINDOW = 180  # seconds
 
 # P1-2：推失败的通知挂在这里下一轮重试（3s 一轮、每轮只出队一条）。
@@ -65,7 +67,7 @@ PENDING_TTL = 900         # 15 分钟还没推出去就放弃：更旧的通知�
 # P0-2：watchdog 每轮写 logs/watchdog.hb，这里每 3 分钟看一眼 mtime。
 # watchdog 不在它自己的 WATCHED 里（没法自我监控），日志里的 heartbeat 也
 # 没有消费者 —— 它一死，四项巡检连同三层告警一起静默失效。
-HB_FILE = Path(__file__).resolve().parents[1] / "logs" / "watchdog.hb"  # pc/logs
+HB_FILE = PC_DIR / "logs" / "watchdog.hb"  # pc/logs
 _hb_alert_at = 0.0
 # 必须在模块级给默认值：原来只在 check_watchdog_hb 的 global 声明里赋值，
 # 而 main 的心跳行 ``f"...{_hb_ok}..."`` 要等 tick%60 那次检查先跑过才安全 ——

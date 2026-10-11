@@ -33,7 +33,12 @@ from pathlib import Path
 
 import httpx
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
+sys.path[:0] = [str(Path(__file__).resolve().parents[1]),            # pc/
+                str(Path(__file__).resolve().parents[1] / "core")]   # 公共件 pclog/fpconfig/fp_feedback/alert_fallback
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
+HERE = paths.PC_DIR                           # pc/（服务与数据同层，frozen 下自动切）
+LOG_DIR = paths.log_dir()                     # pc/logs（frozen 下 data/logs）
+
 # FP_NTFY_URL：与另外 4 个服务同一口径（README「手机」一节写明「把各服务里的
 # FP_NTFY_URL 设为直连地址即可，隧道可以不启动」）。原来这里写死 127.0.0.1 ——
 # 那个模式下 4 个服务全连直连地址、而 watchdog 的 health/告警还在打隧道，
@@ -41,7 +46,6 @@ HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/services/）
 # 拼成 `//topic`（README 的 systemd 示例就带尾斜杠）。
 NTFY_BASE = os.environ.get("FP_NTFY_URL", "http://127.0.0.1:2586").rstrip("/")
 HEALTH_URL = f"{NTFY_BASE}/v1/health"
-LOG_DIR = HERE / "logs"
 
 CHECK_INTERVAL = 60        # 秒
 FAIL_MIN = 5               # 连续不健康多少分钟才告警
@@ -58,7 +62,7 @@ WATCHED = [                # 被监控的 5 个服务（watchdog 不监控自己
     "vision_listener.py",
 ]
 
-PYW = HERE.parent / ".venv" / "Scripts" / "pythonw.exe"   # 和 start_services 同一个
+PYW = paths.venv_dir() / "Scripts" / "pythonw.exe"   # 和 start_services 同一个
 REVIVE_INTERVAL = 300     # 同一服务 5 分钟内只自动拉起一次（防拉起风暴）
 DISK_PCT = 90             # 磁盘使用率告警阈值（VPS 侧同值）
 HB = LOG_DIR / "watchdog.hb"   # 每轮心跳时间戳，给 notification_listener 交叉检查

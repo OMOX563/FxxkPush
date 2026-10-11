@@ -43,8 +43,9 @@ import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parents[1]  # pc/（本文件在 pc/core/）
-LOG_DIR = Path(os.environ.get("FP_LOG_DIR") or (HERE / "logs"))
+import paths                                  # 唯一路径真源（PyInstaller 打包前置）
+HERE = paths.PC_DIR                          # pc/（服务与数据同层，frozen 下自动切）
+LOG_DIR = Path(os.environ.get("FP_LOG_DIR") or paths.log_dir())
 
 # ntfy 只透传已知字段，自定义 header / 未知 JSON 字段一律被服务端丢弃
 # （实测：X-Fp-Trace、trace_id、sequence_id 均 HTTP 200 但订阅端收不到），
