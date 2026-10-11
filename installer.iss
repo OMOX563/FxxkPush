@@ -17,7 +17,7 @@
 ;  4) AppId 用固定 GUID：升级时 Inno 认得是同一个产品，不会并排装两份。
 
 #define AppName "FxxkPush"
-#define AppVersion "0.8.2"
+#define AppVersion "0.9.0"
 #define AppExeName "FxxkPush.exe"
 #define AppPublisher "OMOX563"
 #define AppURL "https://github.com/2986885060/FxxkPush"
