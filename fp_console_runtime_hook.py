@@ -79,24 +79,43 @@ def _has_usable_std() -> bool:
 
 
 def _rebind_std(k32) -> bool:
-    """把 sys.stdout/stderr 重绑到真实控制台句柄，返回是否成功。"""
+    """把 sys.stdout/stderr 重绑到真实控制台句柄，返回是否成功。
+
+    **窗口程序下 sys.stdout 本身可能是 None**（不是指向 nul 的 TextIOWrapper）：
+    没有可继承的标准句柄时 CPython 干脆不建这个对象。此时任何
+    ``print()`` / ``stream.write()`` 都会炸
+    ``AttributeError: 'NoneType' object has no attribute 'write'``
+    —— 实测资源管理器双击 exe 时就是这个形态，而子进程调用（cmd/管道）
+    因为句柄有效永远走不到这里。所以 None 分支必须**主动造一个流**：
+    拿到控制台句柄就绑上去，拿不到就绑 devnull（至少不炸，且不弹黑框）。
+    """
     ok = False
     for name, which in (("stdout", _STD_OUTPUT_HANDLE), ("stderr", _STD_ERROR_HANDLE)):
         stream = getattr(sys, name, None)
-        if stream is None:
-            continue
+        target = None
         try:
             handle = k32.GetStdHandle(which)
-            # 负值 = 无效句柄（未启动的 GUI 进程返回的正是这个）
-            if handle is None or handle == _INVALID_HANDLE_VALUE:
-                continue
-            stream.flush()
-            new = open(handle, "w", encoding="utf-8", errors="replace",
-                       closefd=False)
-            setattr(sys, name, new)
-            ok = True
+            if handle and handle != _INVALID_HANDLE_VALUE:
+                target = open(handle, "w", encoding="utf-8", errors="replace",
+                              closefd=False)
         except Exception:                    # noqa: BLE001
+            target = None
+        if target is None:
+            # 无可用控制台句柄：devnull 兜底，保证 write() 存在。
+            # 静默模式下（DEVNULL 启动）这也是正确的去处。
+            try:
+                target = open(os.devnull, "w", encoding="utf-8", errors="replace")
+            except Exception:                # noqa: BLE001
+                target = None
+        if target is None:
             continue
+        if stream is not None:
+            try:
+                stream.flush()
+            except Exception:                # noqa: BLE001
+                pass
+        setattr(sys, name, target)
+        ok = True
     return ok
 
 

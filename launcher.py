@@ -44,6 +44,7 @@ frozen 下 psutil 之类重依赖可能还没装 —— 这里**不 import** 任
 """
 from __future__ import annotations
 
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -81,8 +82,23 @@ def app_dir() -> Path:
 
 def print_roles(app: Path | None = None, stream=None) -> None:
     """打印可用 role 表。app 给了就顺带标出目标文件是否存在 —— 打包漏了
-    某个模块时这一眼就能看出来，不必等分发时报 FileNotFoundError。"""
+    某个模块时这一眼就能看出来，不必等分发时报 FileNotFoundError。
+
+    **windowed（console=False）下 sys.stdout/sys.stderr 可能是 None**：
+    从资源管理器双击 exe 时进程没有可继承的标准句柄，CPython 干脆不建这两个
+    对象，而下面原来的 `out = stream or sys.stdout` + `out.write(...)` 会直接
+    炸 ``AttributeError: 'NoneType'' object has no attribute 'write'``（实测：
+    双击 exe 无参数 → usage_error → print_roles 崩在第一行）。
+    fp_console_runtime_hook 已在启动期兜底重绑，但那是「尽力而为」（AllocateConsole
+    也可能失败），入口自身必须再兜一层：拿不到可用流就退回 devnull，
+    至少不把「打印用法」变成「抛异常」。
+    """
     out = stream or sys.stdout
+    if out is None or not hasattr(out, "write"):
+        try:
+            out = open(os.devnull, "w", encoding="utf-8", errors="replace")
+        except Exception:                                       # noqa: BLE001
+            return                                             # 真的没地方写：静默返回
     out.write("可用 --role 取值：\n")
     width = max(len(r) for r in ROLES)
     for role, (rel, desc) in ROLES.items():

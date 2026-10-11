@@ -46,7 +46,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
-SetupIconFile=
+SetupIconFile=resources\fxxkpush.ico
 ChangesEnvironment=no
 DisableWelcomePage=no
 

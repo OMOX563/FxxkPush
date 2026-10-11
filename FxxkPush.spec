@@ -75,7 +75,7 @@ PYPATHS = [APP, os.path.join(APP, "pc"), os.path.join(APP, "pc", "core")]
 
 # 图标：仓库无 .ico，暂不设（默认图标）。加了 resources/fxxkpush.ico 后改这两行：
 # ICON = os.path.join(APP, "resources", "fxxkpush.ico")
-ICON = None
+ICON = os.path.join(APP, "resources", "fxxkpush.ico")
 
 HOOKS = [os.path.join(SITE, "_pyinstaller_hooks_contrib")]   # contrib 钩子（含 webview/clr）
 

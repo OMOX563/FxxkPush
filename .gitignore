@@ -27,3 +27,6 @@ dist/
 build/
 *.spec.bak
 build_log.txt
+
+# 应用图标必须入库（spec 与 installer.iss 都要读它才能构建出带图标的产物）
+!resources/
