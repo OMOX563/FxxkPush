@@ -39,6 +39,14 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 def _detect_root() -> Path:
+    """当前目录优先，回退脚本目录。
+
+    frozen 下（exe 双击 / `exe --role gui`）：磁盘上没有 pc/services/*.py，
+    这个 sys.exit 会让 GUI 在建窗口之前就退掉，用户只看到「程序一闪而过」。
+    取 exe 目录（与 paths.APP_DIR 同口径），非 frozen 逻辑一行未动。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     here = Path(__file__).resolve().parent
     for cand in (Path.cwd().resolve(), here):
         if (cand / "pc" / "services" / "ai_triager.py").exists():
