@@ -464,7 +464,17 @@ def analyze(bgra, w, h, key: str, label: str, prompt: str) -> dict | None:
                             f"{str(data)[:60]}")
         return data
     except Exception as e:
-        log(f"analyze error [{key}]: {e!r}")
+        # HTTPStatusError 的 repr 不含响应体 —— 400/5xx 必须记 body 才能定位
+        # （2026-10-10 09:33 两次 400 就因为没记 body 只能判成"瞬时故障"）。
+        # RemoteProtocolError / Timeout 等异常没有 .response，getattr 兜底成空串。
+        resp = getattr(e, "response", None)
+        body = ""
+        if resp is not None:
+            try:
+                body = " body=" + resp.text[:400]
+            except Exception:
+                pass
+        log(f"analyze error [{key}]: {e!r}{body}")
         return None
 
 
