@@ -20,3 +20,10 @@ pc/triage_rules.json
 *.jsonl.1
 *.tmp
 pc/logs/
+
+# PyInstaller 构建产物（不进版本库：FxxkPush.spec / build_exe.bat 是源码，
+# dist/ build/ 是本地产物，分发走 zip 上传 GitHub Release）
+dist/
+build/
+*.spec.bak
+build_log.txt
