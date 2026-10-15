@@ -1,4 +1,4 @@
-# FxxkPush v0.9.0
+# FxxkPush v1.0.0
 
 自建 AI 消息分诊推送服务：PC 上的 AI 判断"哪些通知值得打扰手机"，重要的经 ntfy 推到手机/手表，垃圾静默归档。
 
@@ -10,6 +10,11 @@
 进行二次开发与深度集成：服务端直接复用 ntfy 作为消息中继与手机推送通道，
 PC 端按其发布/订阅协议接入，并在其之上构建了 AI 分诊、误判反馈、链路自愈
 与三层降级告警等能力。ntfy 采用 Apache-2.0 许可证。
+
+手机端那一半（v1.0 起）同样是二次开发：FxxkPush 客户端 fork 自
+[binwiederhier/ntfy-android](https://github.com/binwiederhier/ntfy-android)
+（Apache-2.0），做了品牌化改动，详见「Android 客户端」一章。许可与署名的完整
+说明见「许可与署名」一节。
 
 ## 这解决了什么问题
 
@@ -40,7 +45,7 @@ PC 侧所有服务 → http://127.0.0.1:2586 → (pc/services/ntfy_tunnel.py 走
 
 - **VPS（1C1G）**：传感器 + 中继。ntfy 常驻（推送通道永远在线），日志硬规则判级（grep 级零内存），不跑 AI
 - **PC**：大脑 + 采集器。Windows 通知监听、微信/企业微信视觉识别、AI 分诊、结果推送
-- **手机**：ntfy 客户端接收 + Wear OS 手表震动，微信/QQ/企业微信后台全杀
+- **手机**：FxxkPush 客户端接收（v1.0 前用官方 ntfy App，功能等价）+ Wear OS 手表震动，微信/QQ/企业微信后台全杀
 
 ### 为什么 PC 侧要绕一条 SSH 隧道
 
@@ -210,6 +215,125 @@ FxxkPush.exe --role uninstall --purge         # 卸载并清数据（等价 GUI 
 > 窗口标题与顶栏徽标上的版本号读的是**打进包里的那份 README 首行**，也就是构建
 > 当下的版本——它标的是「你手上这个 exe 是哪一版」，不会跟着仓库后续更新变。
 
+## Android 客户端（v1.0 新增）
+
+**手机端也有本项目的客户端了。** 从这一版起，手机这半边不再依赖应用商店里的
+ntfy——[OMOX563/ntfy-android](https://github.com/OMOX563/ntfy-android)（fork 自
+[binwiederhier/ntfy-android](https://github.com/binwiederhier/ntfy-android) v1.25.2）
+做了 8 项品牌化改动，装出来是「FxxkPush」而不是「ntfy」，深链用
+`fxxkpush://` 而不是 `ntfy://`。
+
+| 项 | 值 |
+|---|---|
+| 包名 | `cc.omox.fxxkpush`（**与官方 ntfy App 可以共存**，两台各装各的，互不覆盖） |
+| 应用名 | FxxkPush |
+| 深链 scheme | `fxxkpush://` |
+| 最低系统 | Android 8.0（API 26） |
+| 主题 | Material3，主题色品牌蓝 `#0B5FCC`，浅色/深色两套都做了 |
+| 图标 | adaptive icon（烧瓶徽章，前景/背景分层，5 个密度各一套） |
+| 默认服务器 | 仍是官方 `ntfy.sh`（没改上游默认行为，你要连自建服就在订阅里填地址） |
+
+构建走 GitHub Actions 的 `assembleFdroidRelease`（fdroid flavor，零 Firebase
+依赖）；签名密钥只存在 CI Secrets（`KEY_PEM_B64` / `CERT_PEM_B64` /
+`KEYSTORE_PASS` / `KEY_PASS`），**仓库里一份密钥材料都没有**。
+
+### 第 1 步：下载 APK
+
+打开 Release 页：
+<https://github.com/OMOX563/ntfy-android/releases/tag/v1.0.0-fxxkpush>
+
+下载唯一那个资产 `FxxkPush-1.25.2-android.apk`（约 10.1 MB）。想确认下的是不是
+这一个，算一下 sha256 对一下：
+
+```powershell
+Get-FileHash .\FxxkPush-1.25.2-android.apk -Algorithm SHA256
+# 应为 3eb9714f38c50740e463abb10f724a30fb23001877ad70bc9db61266193dd5da
+```
+
+### 第 2 步：允许「安装未知来源」
+
+这个 APK 不在 Google Play 上（fdroid flavor 自己签的名），系统会拦一下。放行的
+路径是：**设置 → 应用 → 特殊应用权限 → 安装未知应用** → 选中你刚才用来打开这个
+APK 的那个应用（浏览器或文件管理器）→ 允许。
+
+说明白代价：允许之后，这个应用就能装任意来源的包。装完就可以把这项权限收回
+去了——本项目不发自动更新，以后升级仍是「下一次 + 重新放行」这一套。
+
+### 第 3 步：打开后添加订阅
+
+装完打开 FxxkPush → 右上角 **+** → 添加订阅，三格填：
+
+| 格 | 填什么 |
+|---|---|
+| 服务器 | `http://你的VPS-IP:2586`（**端口 2586 不能省**） |
+| 话题 | `fp-phone` |
+| 账号密码 | VPS 部署脚本结束时打印的那一组（`deploy/setup_vps.sh` 结尾的汇总块：`账号` / `密码`） |
+
+订阅完成后在订阅设置里开**高优先级 + 震动**——本项目推的就是「值得打断你」的
+那类消息，默认优先级等于白推。表里这两格也写了订阅名字，想在列表里一眼认出
+`fp-phone`，可以填 `FxxkPush 通知`。
+
+### 和官方 ntfy App 并存
+
+包名不同（`cc.omox.fxxkpush` vs `io.heckel.ntfy`），两台能同时装、同时收。想
+两个都留着对比着用的常见理由是：官方客户端更新更快，本项目客户端有深链和品牌。
+反过来——**同一个话题不需要订阅两遍**，两个 App 都连同一个 `fp-phone` 会各收一
+遍推送，看起来像重复通知。
+
+## 手机通知深链（v1.0 新增）
+
+深链是「把订阅信息装进 URL，点一下直接跳到 App 里预填好」的形式。FxxkPush
+客户端支持这种链接：
+
+```
+fxxkpush://<host>:2586/fp-phone?secure=false&display=FxxkPush%20通知
+```
+
+- `<host>` = 你的 VPS 地址（不带协议、不带端口，端口单独写在 `:` 后面）
+- `fp-phone` = 话题（URL 的第一段路径就是话题名）
+- `secure=false` 必须显式写：客户端默认按 https 连，本项目的 ntfy 走的是 http，
+  不写这个参数连不上
+- `display=` 是订阅在 App 列表里的显示名，可省
+
+**门户页已经内置了这个按钮。** 手机浏览器打开门户首页（见下一节），在订阅指引
+那一段点「用手机点这里，自动跳转订阅」，就会带着当前这台服务器的主机名拼好
+链接、跳进 FxxkPush 并预填好服务器与话题——只剩账号密码要自己填。桌面浏览器点
+这个按钮不会静默失败，会提示你改用手机打开。
+
+门户页里的地址是运行时从 `location.hostname` 取的，代码里零硬编码：页面从
+哪个口进来（80 还是 2586）都能拼对 2586 的订阅地址。链接也可以自己复制去任何
+地方用——README、短信、备忘录、书签都行。
+
+> 这个 scheme 是本项目客户端的，官方 ntfy App 认的是 `ntfy://`，iOS 那边同理。
+> 点之前确认手机上装的是 FxxkPush。
+
+## 门户网页（v1.0 新增）
+
+用手机浏览器访问 `http://你的VPS-IP`（**80 端口**，不用带 `:2586`）会看到
+FxxkPush 的落地页——ntfy 根路径原本是它自己的网页，现在换成了这个门面。
+
+页面上一共五段：
+
+- **品牌介绍**：一句话说清「手机杀后台、消息不丢」，配一张 `fp-phone` 的真实
+  推送样例卡（标题 / 正文 / 👍👎 按钮 / 静默态）
+- **架构说明**：三个节点（VPS 传感器 / PC 大脑 / 手机接收）+ 三条采集通道表
+- **判定规则**：硬规则 → AI → 黑名单 → fail-open → 去重，五层怎么落
+- **订阅指引**：三步走完，服务器 / 话题 / 账号密码三格可一键复制，含上一节的深链按钮
+- **实时预览控制台**：粘贴你那个 `tk_` 开头的访问令牌，直接在浏览器里看
+  `fp-phone` 的实时消息流——不等手机也能确认这条链路是通的
+
+页面源码就在本仓库 `deploy/web/index.html`：**单文件自包含**（图标内嵌成
+data URI，零外链资源，系统字体栈），自己改完传上去覆盖即可。
+
+**怎么起的、会不会影响推送**：由 VPS 上的 Caddy 在 80 端口把它反代给 ntfy，
+所以门面和推送共用一台机器的一个进程。**2586 端口一条没动**——发布、订阅、
+推送、`/v1/health` 全在 2586 上，反代只发生在根路径这一层。不想要门面的话，
+把 Caddy 那一段去掉就行，2586 上的一切照旧（`deploy/vps_monitor.py` 监控单元
+里带着 `caddy`，顺手也就一起停了）。
+
+两个隐私上的细节：令牌只存在浏览器内存里，刷新即清空；页面带 `noindex`，不被
+搜索引擎收录。
+
 ## 上手教程（GUI 主线）
 
 > 走的是**源码路线**：需要 Python 3.12+ 或 [uv](https://uv.sh)，装依赖、跑向导
@@ -222,7 +346,7 @@ FxxkPush.exe --role uninstall --purge         # 卸载并清数据（等价 GUI 
 - 一台 Windows 10/11 PC：PATH 里有 Python 3.12+ 或 [uv](https://uv.sh)
   （`GUI.bat` 按 `python` → `uv` → `python3` 的顺序找解释器）；Win11 自带
   WebView2 Runtime，Win10 缺了就装 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
-- 手机能装 ntfy 客户端
+- 手机能装客户端（Android 装本项目的 FxxkPush 客户端或官方 ntfy，iOS 装官方 ntfy）
 
 > 只想**用**不要改代码的话，上面这两条都不必满足——走上一章的安装包，
 > 用户机器不需要 Python。
@@ -258,6 +382,13 @@ systemctl enable --now ntfy
 curl http://127.0.0.1:2586/v1/health            # 返回 200 即成功
 mkdir -p /opt/fuckpush && cp deploy/vps_monitor.py /opt/fuckpush/
 ```
+
+**门户页（可选，v1.0 新增）**：想让人打开 `http://你的VPS-IP` 就看到 FxxkPush
+的落地页，就在 80 端口加一个 Caddy 反代——把 `deploy/web/index.html` 传到
+`/var/www/fxxkpush/index.html`，然后让它在 80 端口把根路径指到这个静态文件、其余
+路径 `reverse_proxy` 给 `127.0.0.1:2586` 的 ntfy。这只动 80 端口，2586 上的
+发布 / 订阅 / 推送 / `/v1/health` 一条没动。不想要门面就别配，ntfy 本来也只在
+2586 上对外。细节见「门户网页」一章。
 
 日志监控的 systemd unit（`deploy/setup_vps.sh` 会替你写好，手动部署照抄，
 放到 `/etc/systemd/system/fuckpush-monitor.service`）：
@@ -303,7 +434,7 @@ systemctl is-active ntfy fuckpush-monitor   # 两个都应是 active
 - 界面三个页签：**仪表盘 / 配置 / 控制**（逐卡说明见下一节「图形化界面（v0.8）」）
 - 控制台跟着 GUI：窗口正常关闭 → 控制台自动关闭；只有启动失败才 `pause` 保留，
   好让你读报错
-- 重复双击会聚焦已开的窗口（单实例），窗口标题 `FxxkPush v0.9.0`（版本号读
+- 重复双击会聚焦已开的窗口（单实例），窗口标题 `FxxkPush v1.0.0`（版本号读
   README 首行 H1）
 - 打不开、提示没找到 Python 或缺 pywebview → 见附录「排障」
 
@@ -346,11 +477,14 @@ systemctl is-active ntfy fuckpush-monitor   # 两个都应是 active
 五个服务就会对着一个还没就绪的 `2586` 空转刷错，而且没有任何报错提示这是
 「启动顺序」问题。
 
-### 第 7 步：手机装 ntfy 订阅
+### 第 7 步：手机装客户端订阅
 
-1. 装 ntfy（Play Store / F-Droid / App Store）
+1. 装客户端：Android 装 [FxxkPush 客户端](https://github.com/OMOX563/ntfy-android/releases/tag/v1.0.0-fxxkpush)（安装步骤见「Android 客户端」一章）或官方 ntfy（Play Store / F-Droid）；iOS 只能装官方 ntfy（App Store）
 2. 按第 2 步脚本打印的信息添加订阅：服务器 `http://你的VPS-IP:2586`，话题 `fp-phone`
 3. 订阅设置里填账号密码（第 2 步创建的用户），开**高优先级 + 震动**
+
+> 不想一个字母一个字母填的：用手机打开门户页（`http://你的VPS-IP`），
+> 点「用手机点这里，自动跳转订阅」，服务器和话题会自动预填，只剩账号密码。
 
 ### 装完验证一遍
 
@@ -513,7 +647,7 @@ powershell -c "Compress-Archive -Path dist\FxxkPush\* -DestinationPath FxxkPush-
 - **必须 Python 3.12**：`pywinrt` / `pythonnet` 对高版本解释器不友好（3.14 报
   cannot create instances），换版本构建出来的包在用户机上也是坏的
 - **必须 Inno Setup 7**：`.iss` 里用了 6.x 之后的语法
-- **`installer.iss` 里的 `AppVersion` 要手动改**（当前 `0.9.0`）——它决定产物
+- **`installer.iss` 里的 `AppVersion` 要手动改**（当前 `0.9.0`，H1 已是 `v1.0.0`，发布前对一下）——它决定产物
   文件名与安装包属性，忘了改会编出一个名字带旧版本号的包
 - **`console=False` 别改回 `console=True`**：改成控制台子系统后，GUI 启动会弹出
   一个黑框窗口贴在界面后面；兜底由 `fp_console_runtime_hook.py` 做
@@ -561,6 +695,7 @@ powershell -c "Compress-Archive -Path dist\FxxkPush\* -DestinationPath FxxkPush-
 |---|---|---|
 | `deploy/vps_monitor.py` | VPS (systemd) | journalctl 采集 + 硬规则判级 + 灰区落盘，60s 巡检，冷却去重 |
 | `deploy/ntfy-server.yml` | VPS | ntfy 服务端配置（token 鉴权，deny-all） |
+| `deploy/web/index.html` | VPS (Caddy 反代) | 门户落地页：单文件自包含（图标内嵌、零外链），品牌介绍 / 架构 / 判定规则 / 订阅指引（含 `fxxkpush://` 深链按钮）/ 实时预览控制台，`noindex`。部署在 80 端口，不影响 2586 |
 | `pc/services/ntfy_tunnel.py` | PC (自启) | SSH 本地转发：`127.0.0.1:2586` → VPS ntfy，绕开端口封锁，断线自愈 |
 | `pc/services/notification_listener.py` | PC (自启) | UserNotificationListener 抓 toast → fp-pc + JSONL 归档 |
 | `pc/services/vision_listener.py` | PC (自启) | 按 `fp.config.json` vision 块清单把窗口藏屏外 → 定时截图 → 云端/本地OCR模型视觉分诊（进程→类名→标题正则三层匹配） |
@@ -678,6 +813,38 @@ GUI 保存后的「一键启动（重启生效）」按钮，或命令行
 > 历史版本中的 `vps.secret` / `pc/ntfy.secret` / `pc/triage_config.json` /
 > `pc/vision_targets.json` 已删除（内容全部并入 `fp.config.json`）。
 
+## 许可与署名
+
+本项目是**基于 ntfy 的二次开发作品**，不是从零写的新系统。两个上游都是
+Apache License 2.0，版权归上游开发者所有——**Philipp C. Heckel**（ntfy 创始人）及
+ntfy 项目的全部贡献者。本项目保留了这些原始作品的许可与署名：
+
+| 上游 | 作品 | 许可 | 归属 | 在本项目里的地位 |
+|---|---|---|---|---|
+| [binwiederhier/ntfy](https://github.com/binwiederhier/ntfy) | ntfy 服务端 | Apache-2.0 | 上游开发者 | VPS 上的推送中继与服务端（直接复用） |
+| [binwiederhier/ntfy-android](https://github.com/binwiederhier/ntfy-android) | ntfy Android 客户端 | Apache-2.0 | 上游开发者 | [OMOX563/ntfy-android](https://github.com/OMOX563/ntfy-android) 的父仓，FxxkPush 客户端在其上做品牌化 |
+
+具体做了什么（不宣称原创，只说二次开发范围）：
+
+- 服务端直接复用 ntfy，PC 侧按其发布 / 订阅协议接入，在其上加 AI 分诊、
+  误判反馈、链路自愈、三层降级告警
+- 手机客户端 fork 自 ntfy-android v1.25.2，改包名 / 应用名 / 深链 scheme /
+  主题色 / 图标 / 构建流程（具体见「Android 客户端」一章），上游
+  默认服务器 `ntfy.sh` 不变，本仓保留完整的上游历史
+
+必须遵守的两件事：
+
+- **保留原许可与署名**：分发任何二次开发产物（包括 APK 与 exe）都要带着
+  Apache-2.0 的署名与原仓地址；门户页页脚已经带了 ntfy 的署名与
+  Apache License 2.0 字样，发布 APK 时请一并加上（客户端仓库已有）
+- **不得误导用户以为这是官方 ntfy 产品**：FxxkPush 是二次开发作品，与
+  ntfy 官方无归属关系；服务端与客户端的质量与维护在上游
+
+**本仓自己写的部分**（PC 端服务、GUI、打包与安装脚本、部署脚本、
+门户页、文档）**可以自由使用**，包括自建部署、改成自己的采集与分诊规则、
+部署到自己的服务器。需要的前提与 ntfy 服务端的 Apache-2.0
+要求一致：保留上游许可与署名。
+
 ## 已知边界
 
 - 微信/企业微信消息推送有最长 30 分钟延迟（视觉通道；QQ 走 toast 秒级）（轮询间隔，用实时性换零打扰，`fp.config.json` vision 块的 `settings.poll_min` 全局可调，目标条目也可单独写 `poll_min`）
@@ -707,13 +874,15 @@ GUI 保存后的「一键启动（重启生效）」按钮，或命令行
 - [x] v0.8.0：图形化界面（GUI）—— pywebview + 液态玻璃控制台：仪表盘（服务/隧道/自启/看门狗/启动日志）、配置表单合并写入 fp.config（密钥留空保持）、一键启动/停止、自启开关、窗口归位、一键卸载（可选清数据）
 - [x] v0.8.1：五轮全量代码审查（114 项发现 / 91 项修复，P0 清零）+ 教程面向 GUI 重写 —— R1 修 28 处（`fail`/`os` 未定义 NameError、GDI/SFTP 句柄泄漏、SFTP 心跳可击穿监控、临时文件双写、空 token 假告警）、R2 修 25 处（GUI 整读 4MB 日志、AI 与 vision 导入期配置快照不自愈、同步 HTTP 阻塞事件循环、trace 泄漏、全断流行两条判据都不认）、R3 修 21 处（`_ai()` 静默返回空导致启动即死 R2 回归）、R4 修 10 处（fp-phone 非 200 零日志、固定临时名 + 固定名并发写坏唯一配置源、各服务补 excepthook）、R5 修 7 处（vision 模型字段非列表导致整轮作废、pclog 建不出目录在 excepthook 之前打死六个服务、GUI 从零写入缺三块配置）
 - [x] v0.9.0：可执行 exe 分发版 —— **用户机器不再需要装 Python**。路径抽象层 `pc/core/paths.py`（APP_DIR/RES_DIR/DATA_DIR 三维正交，可写数据落 exe 同级 `data/`，Program Files 无写权限时降级 `%LOCALAPPDATA%`）+ 单一多路复用入口 `launcher.py --role`（12 个 role，frozen 与源码共用一个入口，双击 exe 默认开 GUI）+ 进程分叉点 `pc/core/procspawn.py`（exe 模式一个服务 1 个进程，自启项形态变为 `"FxxkPush.exe" --role x`）+ PyInstaller 6 onedir 打包（`FxxkPush.spec` / `build_exe.bat`，`console=False` 无黑窗、应用图标、runtime hook 兜 stderr）+ Inno Setup 7 安装包（`installer.iss`，用户级安装零提权、桌面快捷方式可选、卸载分「保留数据/清数据」两档、只停删自己那份进程与自启项）+ GUI 开窗前探测 WebView2 缺失并给安装指引与命令行降级路径
+- [x] v1.0.0：**三件事把「装给自己」路径补齐** —— ① **自研 Android 客户端**：fork 自 ntfy-android v1.25.2（Apache-2.0）做 8 项品牌化（包名 `cc.omox.fxxkpush` 可与官方 ntfy 共存、应用名 FxxkPush、深链 `fxxkpush://`、Material3 品牌蓝 `#0B5FCC`、adaptive icon、Android 8.0 起、fdroid flavor 零 Firebase 构建、签名密钥只在 CI Secrets、默认服务器仍是 ntfy.sh），仓库 OMOX563/ntfy-android，Release `FxxkPush-1.25.2-android.apk`；② **自建门户网页**：`deploy/web/index.html` 单文件自包含，品牌落地页 + 架构说明 + 判定规则 + 订阅指引（含 `fxxkpush://` 深链一键预填）+ 实时预览控制台，深浅三态主题，Caddy 反代在 80 端口（不动 2586）；③ **免 Python 安装包**：v0.9.0 的 exe + Inno Setup 产物继续主线。同时新增「许可与署名」一节（Apache-2.0 二次开发的边界）
+
 - [ ] 钉钉 / 学习通等更多 App 深度适配
 - [ ] 视觉截图瘦身与留档（未发版，原排在 v0.9.0 位置，被 exe 分发版占号后顺延）—— 企微全尺寸截图（1233×813 ≈ 132KB/张，微信 544×519 ≈ 45KB）识别前降采样，降低上传体积与识别成本；截图落盘并滚动保留 24 小时，清理时机 = 重新开机时 + 每日凌晨
 - [ ] 每日日报（AI 汇总当天事件/误判，22:00 推手机；`fp_feedback.stats()` 已备好误判统计）
 - [ ] 误判样本 → 27B 模型微调（语料已在 `pc/feedback.jsonl` 自包含落地，缺训练流程）
 - [ ] 反馈的「该推没推」信号（当前只有👎 能点，被静默的消息手机上没有按钮）
 - [ ] WebSocket 订阅 + PWA 界面
-- [ ] ntfy for Android 界面重写与美化：官方客户端功能够用但界面糙（列表、主题、排版都谈不上好看），按本项目的分诊语义自绘客户端 —— 来源分组、优先级着色、误判可就地纠正
+- [x] ntfy for Android 界面重写与美化：已完成 —— 官方客户端功能够用但界面粗，v1.0.0 以自研品牌客户端（Android）代替，仍剩的是按分诊语义自绘界面：来源分组、优先级着色、误判就地纠正 —— 待做
 - [x] 自定义软件接入：接入层配置化，新软件用声明式配置即可纳入分诊，不必逐个写死适配代码（已实现：`apps` 块声明规则 + vision 窗口条目，闸门与视觉双通道消费）
 - [ ] 可操作 UI：推送从「只能看」升级到「能点」—— 通知内直接给动作（已读回执 / 静音该来源 / 稍后提醒 / 重推），动作回传 PC 执行
 - [ ] Go 重写（性能瓶颈出现后）
