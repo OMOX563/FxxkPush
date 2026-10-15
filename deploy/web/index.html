@@ -406,6 +406,10 @@
           <div>
             <h3>手机装 ntfy App</h3>
             <p>Android 装 <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" rel="noopener">Google Play</a> 或 <a href="https://github.com/binwiederhier/ntfy/releases" rel="noopener">APK</a>；iOS 装 <a href="https://apps.apple.com/app/ntfy/id1625396347" rel="noopener">App Store</a>。装完给它通知权限。</p>
+            <p style="margin-top:12px;">
+              <a class="btn primary" id="deeplink-btn" href="#" style="font-size:14px; padding:9px 16px;">用手机点这里，自动跳转订阅</a>
+            </p>
+            <p class="privacy" style="margin-top:6px;">需在手机浏览器打开本页；自动预填服务器与话题（要求 FxxkPush 手机端）</p>
           </div>
         </div>
         <div class="step">
@@ -462,10 +466,31 @@
 (function () {
   "use strict";
 
-  /* ---------- 服务器地址（本页来源即地址，不用硬编码） ---------- */
-  var srv = location.origin;
+  /* ---------- 服务器地址（动态推导，不硬编码 IP）----------
+     页面可能被反代在 :80，而订阅要填的是 ntfy 端口 2586：
+     同源直出（:2586）时用 location.origin；否则取同主机的 2586。 */
+  var srv = location.port === "2586"
+    ? location.origin
+    : location.protocol + "//" + location.hostname + ":2586";
   var el = document.getElementById("srv-url");
   if (el) el.textContent = srv;
+
+  /* ---------- 深链按钮（fxxkpush:// App 自动预填订阅）----------
+     URL 格式来自 ntfy-android DetailActivity 源码：
+     pathSegments[0]=话题，?secure=false 强制 http（默认 https），
+     ?display= 显示名。 */
+  var dl = document.getElementById("deeplink-btn");
+  if (dl) {
+    var host = location.hostname;
+    dl.href = "fxxkpush://" + host + ":2586/fp-phone?secure=false&display=" + encodeURIComponent("FxxkPush 通知");
+    /* 桌面浏览器点了无反应（没装对应 App），提示用手机开 */
+    dl.addEventListener("click", function (e) {
+      if (!/Android|iPhone|iPad/i.test(navigator.userAgent)) {
+        e.preventDefault();
+        alert("请用手机浏览器打开本页，再点此按钮（会自动跳转 FxxkPush 手机端并预填订阅）");
+      }
+    });
+  }
 
   /* ---------- 主题切换：auto → light → dark ---------- */
   var modes = ["auto", "light", "dark"];
