@@ -64,6 +64,11 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 ; dist\FxxkPush\{#AppExeName} + _internal\ 全量（构建产物，勿手改）
 ; 本 iss 位于**仓库根**，构建产物在同级 dist\（不是 ..\dist —— 那是上一级）
 Source: "dist\FxxkPush\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 安装前停服务用的脚本。
+; 装到 Inno 的临时解压目录而不是安装目录 ——
+; PrepareToInstall 跑在 [Files] **之前**，那时安装目录里还没有这个脚本，
+; 只有临时解压目录里有（安装包解压时就放好了）。
+Source: "deploy\stop_running.ps1"; DestDir: "{tmp}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -135,4 +140,68 @@ begin
   { 装完若 data 目录不存在则建一个，让用户一眼看出「运行数据在这里」 }
   if CurStep = ssPostInstall then
     CreateDir(ExpandConstant('{app}\data'));
+end;
+
+{ ------------------------------------------------------------------
+  装之前停掉正在运行的旧程序（2026-10-27 补）
+
+  现象：程序在运行时点安装 → Inno 覆盖 FxxkPush.exe 失败 → 安装报错。
+  原因：exe 正在被 6 个服务进程 + GUI 占用，Windows 不允许覆盖运行中的文件。
+
+  做法：调 deploy\stop_running.ps1，按**完整 exe 路径**结束占用
+  安装目录下 FxxkPush.exe 的进程（只停进程，不摘自启、不动 data/）。
+
+  为什么不用「调旧 exe 的 --role stop」：
+    旧版本（v0.9.0 及之前）**没有 stop 这个 role**，调它只会得到
+    「未知 role」错误 —— 装了新版的第一次升级就会撞上这个死结。
+    stop role（pc/bootstrap/stop_services.py）是这次新加的，它的价值在
+    **下一次**升级、以及手动排障时「停掉跑着的服务」。
+
+  为什么不用 Inno 自带的 CloseApplications：
+    它按「安装器自己也在运行」设计，依赖 Restart Manager，
+    对「被另一个 exe 占用的文件」不保证生效；也不区分我们的进程与别人。
+
+  为什么按路径而不是按进程名：
+    同机可能同时存在源码树副本（走 pythonw.exe，路径在仓库里）与安装版。
+    按名字杀会误伤别的副本（uninstall.py 踩过这个坑并留了注释）。
+    按 ExecutablePath 精确比路径，只命中本次安装目录这一份。
+
+  找不到旧 exe（首次安装）→ 跳过，不报错。
+  ------------------------------------------------------------------ }
+function StopRunningFxxkPush: Boolean;
+var
+  OldExe: String;
+  ScriptPath: String;
+  Cmd: String;
+  ResultCode: Integer;
+begin
+  Result := True;
+  OldExe := ExpandConstant('{app}\{#AppExeName}');
+  if not FileExists(OldExe) then
+  begin
+    { 首次安装，没有旧程序可停 }
+    Exit;
+  end;
+
+  ScriptPath := ExpandConstant('{tmp}\stop_running.ps1');
+  if not FileExists(ScriptPath) then
+  begin
+    Log('未找到 ' + ScriptPath + '，跳过停止运行中的进程');
+    Exit;
+  end;
+  Cmd := 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath +
+         '" -ExePath "' + OldExe + '"';
+  Exec(Cmd, '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode = 0 then
+    Log('已结束占用 ' + OldExe + ' 的进程')
+  else
+    Log('结束占用 ' + OldExe + ' 的进程返回 ' + IntToStr(ResultCode) +
+        '（继续安装；若覆盖 exe 失败请手动结束进程后重试）');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  NeedsRestart := False;
+  StopRunningFxxkPush;
 end;

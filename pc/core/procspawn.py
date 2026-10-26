@@ -46,6 +46,9 @@ SCRIPT_ROLE: dict[str, str] = {
     "vision_listener.py": "vision",
     "watchdog.py": "watchdog",
     "start_services.py": "start",     # 启动编排；frozen 下 GUI/setup 也走它
+    "stop_services.py": "stop",       # 停服务进程（安装前用）；**不是**常驻服务，
+                                       # 不在 SERVICE_SCRIPTS 里 —— 它跑完就退，
+                                       # 不能被看门狗当成「少了一个服务」而拉起。
 }
 ROLE_SCRIPT: dict[str, str] = {r: s for s, r in SCRIPT_ROLE.items()}
 
@@ -111,7 +114,8 @@ def reset_denied() -> None:
     _denied[0] = 0
 
 
-def our_procs(frozen: bool | None = None) -> list[tuple[int, str, str | None]]:
+def our_procs(frozen: bool | None = None,
+              exe_name: str | None = None) -> list[tuple[int, str, str | None]]:
     """[(pid, cmdline, role), ...] 本项目拉起来的进程（含 watchdog 自己）。
 
     frozen      进程名 == exe 文件名 且 cmdline 带 ``--role <已知 role>``。
@@ -119,15 +123,32 @@ def our_procs(frozen: bool | None = None) -> list[tuple[int, str, str | None]]:
                 （与改造前逐字节同口径：反斜杠正斜杠都认，不碰 Hermes 等其它
                 pythonw）。role 由命令行里的脚本名反查 —— 两边最终都归一到
                 同一个 role 键，调用方的计数/判定逻辑只有一份。
+
+    exe_name    显式指定「要找的 exe 名」。**frozen 判定本来是问「当前进程
+                是不是 frozen」**（即当前 exe 名 == 目标 exe 名），所以从
+                源码态（python.exe）去枚举打包版（FxxkPush.exe）永远找不到：
+                want_exe 会算成 "python.exe"，与 FxxkPush.exe 对不上。
+                2026-10-27 装前停服务的场景正是跨形态的 —— 显式给出
+                exe_name="FxxkPush.exe" 才能停到打包版进程。
     """
     import psutil                      # 局部导入：没装 psutil 的场景先炸在这里，
                                       # 与改造前一致（都在函数内 import）
     out: list[tuple[int, str, str | None]] = []
-    want_exe = Path(sys.executable).name.lower() if _frozen(frozen) else None
+    # exe_name 一旦显式给出，就**强制走打包版口径**（按 exe 名匹配 + --role 解析）。
+    # 否则 frozen=None 会问「当前进程是不是 frozen」——源码态下算出
+    # want_exe="python.exe"，于是永远匹配不到 FxxkPush.exe，
+    # 整条 exe_name 参数形同虚设（2026-10-27 实测踩过）。
+    use_frozen = bool(exe_name) or _frozen(frozen)
+    if exe_name:
+        want_exe = exe_name.lower()
+    elif use_frozen:
+        want_exe = Path(sys.executable).name.lower()
+    else:
+        want_exe = None
     for proc in psutil.process_iter(["name"]):
         try:
             name = (proc.info.get("name") or "").lower()
-            if _frozen(frozen):
+            if use_frozen:
                 if want_exe and name != want_exe:
                     continue
             elif name != "pythonw.exe":
@@ -136,7 +157,7 @@ def our_procs(frozen: bool | None = None) -> list[tuple[int, str, str | None]]:
                 cmd = " ".join(proc.cmdline() or [])
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-            if _frozen(frozen):
+            if use_frozen:
                 role = role_of(cmd)
                 if role not in ROLE_SCRIPT:
                     continue      # 只认本项目的 role，别人的 exe --role 无辜

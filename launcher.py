@@ -60,6 +60,7 @@ ROLES: dict[str, tuple[str, str]] = {
     "vision":     ("pc/services/vision_listener.py",      "微信截图监听（子命令 park/unpark/list）"),
     "watchdog":   ("pc/services/watchdog.py",             "管道自检 + 三层告警"),
     "start":      ("pc/bootstrap/start_services.py",      "启动编排（健康门 + 进程自检）"),
+    "stop":       ("pc/bootstrap/stop_services.py",       "停止服务进程（不动自启与数据，安装前用）"),
     "gui":        ("fxxkpush_gui.py",                     "图形界面（含 --smoke）"),
     "setup":      ("setup.py",                            "安装向导"),
     "uninstall":  ("uninstall.py",                        "卸载（--yes/--purge/--dry-run）"),

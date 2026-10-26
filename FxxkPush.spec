@@ -108,6 +108,7 @@ EXPLICIT = [
     "pc.services.vision_listener",
     "pc.services.watchdog",
     "pc.bootstrap.start_services",
+    "pc.bootstrap.stop_services",   # 安装前停旧进程用（--role stop）
     "fxxkpush_gui",
     "setup",
     "uninstall",
