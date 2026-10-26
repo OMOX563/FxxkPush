@@ -315,13 +315,48 @@ async def classify(client: httpx.AsyncClient, kind: str, content: str,
     return json.loads(text)
 
 
+# 去重 key 的规范化（2026-10-26 加，见 dedup_check 的说明）
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\u2600-\u27BF\U0001F1E6-\U0001F1FF"
+    "\uFE00-\uFE0F\u2190-\u21FF\u2B00-\u2BFF]+")
+_BRACKET_TAG_RE = re.compile(r"\[[^\[\]]{1,8}\]")
+_FULLWIDTH_MAP = str.maketrans({
+    "\uff1a": ":", "\uff0c": ",", "\u3002": ".", "\uff08": "(", "\uff09": ")",
+    "\uff01": "!", "\uff1f": "?", "\uff1b": ";", "\u3001": ",",
+    "\u2014": "-", "\u2013": "-", "\uff5e": "~",
+})
+
+
+def _dedup_norm(content: str) -> str:
+    """把内容规范化成去重 key 的原料（不含 kind 前缀）。
+
+    只做「表现形式」的归一，不碰语义：去 emoji、去 [方括号标签]、
+    全角标点折半角、去空白。规范化后相同的两条，判定为同一件事。
+    """
+    s = _BRACKET_TAG_RE.sub("", content)
+    s = _EMOJI_RE.sub("", s)
+    s = s.translate(_FULLWIDTH_MAP)
+    return re.sub(r"\s+", "", s)
+
+
 def dedup_check(st, kind, content) -> str | None:
     """同一源在窗口期内的重复条目整条压掉（不问 AI、不推送）。
 
     返回 ``"pass"`` 表示首次出现、放行；``None`` 表示命中窗口、压掉。
     调用方只判 ``is None``。
     """
-    src = re.sub(r"\s+", "", content)[:40]
+    # 去重 key 的规范化（2026-10-26）：
+    #   · emoji 去掉 —— 同一个人的同一条消息，微信可能这次发 💕、下次发 [爱心]
+    #   · [xxx] 方括号标签去掉 —— 微信的 [文件]/[图片] 标记与内容语义无关
+    #   · 全角标点折半角 —— 「：」与「:」不该算两条
+    #   · 空白去掉
+    # 之前只做「去空白 + 取前 40 字」，所以「小鬼💕: ...」与「小鬼[爱心]：...」
+    # 被当成两条不同消息，各推一次。
+    #
+    # 只做**精确级**规范化，不引入语义级/主题级聚类 —— 后者实测会误伤
+    # （「小鬼: A.pdf」与「小鬼: B.pdf」剥掉拉丁串后都变成「小鬼:」而被判同一条）。
+    # 精确级零误伤：不同内容规范化后仍不同。
+    src = _dedup_norm(content)[:40]
     now = time.time()
     win = _ai()["dedup_window_sec"]
     for k in list(st["recent"]):

@@ -238,6 +238,17 @@ def extract(n) -> dict | None:
             texts = [t.text for t in binding.get_text_elements() if t.text]
     except Exception:
         pass
+    # 2026-10-26 实测的坑：display_name 取不到时 app = "?"，上面那个
+    # SELF_MARKERS 检查（按 app 名）完全失效 —— 自家 toast 就以 "?" 的身份
+    # 被当成外来通知抓走，再往 ntfy 转发。而此刻隧道正断着
+    # （health ConnectError WinError 10061），转发必然失败 → 每条都进 ARCH
+    # → 15 分钟刷出 178 条「服务健康故障 5分钟」，把通知栏淹了。
+    #
+    # 修法：app 取不到时改用**正文**判断。自家 watchdog/notification_listener
+    # 发出的通知正文都带 "[FxxkPush]" 前缀（watchdog 的 title 恒为
+    # f"[FxxkPush] {CHECK_CN...}"），这类一律不当外来通知。
+    if app == "?" and "[FxxkPush]" in " ".join(texts):
+        return None
     if is_our_toast(texts):
         return None  # echo of a toast pc_subscriber popped -> do not re-triage
     return {

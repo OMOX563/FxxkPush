@@ -53,6 +53,12 @@ FAIL_MIN = 5               # 连续不健康多少分钟才告警
 LINK_ERR_MIN = 300         # link 检查回看多少秒
 LINK_ERR_THRESHOLD = 3     # 这段时间内至少几条错误
 RENOTIFY = 1800            # 同一故障持续时最多重复提醒的秒数（防刷屏）
+ALERT_RETRY_INTERVAL = 300  # 告警发送失败后的重试间隔（秒）。
+                             # 2026-10-26 实测：隧道断时告警必失败，不限频就是
+                             # 每轮（60s）重试一次；而告警本身以 Windows 通知形式
+                             # 出现，又被 notification_listener 抓去转发 → 转发同样失败
+                             # → 15 分钟刷出 178 条同款告警。300s 把失败期重试
+                             # 压到 5 分钟一次。恢复后仍按 RENOTIFY 正常重复。
 HEARTBEAT_CYCLES = 10      # 每 10 轮（10 分钟）记一条心跳
 
 WATCHED = [                # 被监控的 5 个服务（watchdog 不监控自己，见 _log_crash）
@@ -657,6 +663,11 @@ def main() -> int:
     LOG.info(f"watchdog up: interval={CHECK_INTERVAL}s fail_threshold={FAIL_MIN}min")
     fault_since: dict[str, float] = {}
     last_alert: dict[str, float] = {}   # name -> 上次告警时间
+    last_alert_retry: dict[str, float] = {}   # name -> 上次「发送失败」的时间
+                                        # 发送失败时 last_alert 也会被写（用短间隔），
+                                        # 但它代表的是「尝试过」而非「送达」，
+                                        # 恢复后要按 RENOTIFY 正常重复，不能被
+                                        # 失败期的短间隔永久压住 —— 这就是分开记的原因。
     last_any_alert = 0.0                # P2-2 全局键：任何一条告警的发送时间
     recover_pending: dict[str, tuple[str, float, str]] = {}  # P2-2 发失败的恢复通知
     cycle = 0
@@ -725,10 +736,22 @@ def main() -> int:
         # 戳，下一轮（60s）整批重试（P2-7 语义原样保留）。
         try:
             if red_batch:
+                # 限频判定分两种：
+                #   · 已送达过的 → 按 RENOTIFY(1800s) 重复
+                #   · 上次发送失败 → 按 ALERT_RETRY_INTERVAL(300s) 重试
+                # 两者都还要过全局键（任何告警刚发过，重复项先憋着）。
+                def _due_ok(n: str) -> bool:
+                    if n not in last_alert:
+                        return True          # 首次告警，立刻喊
+                    gap = _elapsed(now, last_alert[n])
+                    limit = (ALERT_RETRY_INTERVAL if n in last_alert_retry
+                             else RENOTIFY)
+                    if gap < limit:
+                        return False
+                    return _elapsed(now, last_any_alert) >= limit
+
                 due = [(n, d, du, st_) for n, d, du, st_ in red_batch
-                       if n not in last_alert
-                       or (_elapsed(now, last_alert[n]) >= RENOTIFY
-                           and _elapsed(now, last_any_alert) >= RENOTIFY)]
+                       if _due_ok(n)]
                 if due:
                     parts, max_dur = [], 0.0
                     for n, d, du, st_ in due:
@@ -751,9 +774,31 @@ def main() -> int:
                         sent_at = time.time()
                         for n, *_ in due:
                             last_alert[n] = sent_at   # P2-7：真送出去才记
+                            last_alert_retry.pop(n, None)   # 送达了，失败期标记作废
                         last_any_alert = sent_at
                     else:
-                        LOG.error(f"告警发送失败，下一轮重试: {[n for n, *_ in due]}")
+                        # 2026-10-26 实测的坑（P2-7 的例外，必须补）：
+                        # 隧道断了的时候 send_alert 必然失败（告警通道与被监控对象
+                        # 共用隧道），于是 last_alert 永远不写 → 限频形同虚设 →
+                        # 每轮巡检都重试一次；而 watchdog 的告警是以 Windows 通知
+                        # 弹窗形式出现的，notification_listener 又会抓到这条通知
+                        # 再往 ntfy 转发 → 转发也失败（同一个隧道）→ 归档。
+                        # 实测 04:34~04:49 刷出 178 条「服务健康故障」，
+                        # RENOTIFY=1800 完全失效。
+                        #
+                        # 修法：**发送失败也要记时间戳**，只是单独用一个短间隔
+                        # 键 _alert_retry_at（默认 300s），让断网期间的失败重试
+                        # 降到 5 分钟一次，而不是每轮 60 秒一次。
+                        # 恢复后仍按 RENOTIFY 正常重复。
+                        # 记时间戳（用短间隔语义）：last_alert 存的是「上次尝试时间」，
+                        # 发送失败时也要写，否则每轮都重试。
+                        retry_at = time.time()
+                        for n, *_ in due:
+                            last_alert[n] = retry_at
+                            last_alert_retry[n] = retry_at
+                        last_any_alert = retry_at
+                        LOG.error(f"告警发送失败，限频兜底 {ALERT_RETRY_INTERVAL}s 后重试: "
+                                  f"{[n for n, *_ in due]}")
         except Exception as e:
             # r8 P1-2：msg 组装/send_alert 外围的任何异常都不许穿透到主循环
             LOG.error(f"告警段异常(已隔离, 下一轮重试): {[n for n, *_ in red_batch]} {e!r}")
