@@ -1,5 +1,5 @@
 ; FxxkPush 安装脚本（Inno Setup 7）
-; 产物：dist\FxxkPush-Setup-0.8.2.exe（约 25MB，含卸载器）
+; 产物：dist\FxxkPush-Setup-0.9.1.exe（约 25MB，含卸载器）
 ; 用法：ISCC.exe installer.iss
 ;
 ; 关键设计决策（改前先读）：
@@ -17,10 +17,10 @@
 ;  4) AppId 用固定 GUID：升级时 Inno 认得是同一个产品，不会并排装两份。
 
 #define AppName "FxxkPush"
-#define AppVersion "0.9.0"
+#define AppVersion "0.9.1"
 #define AppExeName "FxxkPush.exe"
 #define AppPublisher "OMOX563"
-#define AppURL "https://github.com/2986885060/FxxkPush"
+#define AppURL "https://github.com/OMOX563/FxxkPush"
 
 [Setup]
 AppId={{9E4C1F2A-6B3D-4A17-9C5E-2D8F7B1A4E30}
